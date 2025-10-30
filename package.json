@@ -1,0 +1,26 @@
+{
+  "name": "load-automation-cloud",
+  "version": "1.0.0",
+  "description": "Cloud-based load automation service",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "mkdir -p public && echo 'API Ready' > public/index.html",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "@sparticuz/chromium": "^126.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "puppeteer": "^22.15.0",
+    "puppeteer-core": "^22.15.0"
+  },
+  "engines": {
+    "node": "20.x"
+  },
+  "author": "Ed Mangino",
+  "license": "MIT",
+  "main": "index.js",
+  "keywords": []
+}
