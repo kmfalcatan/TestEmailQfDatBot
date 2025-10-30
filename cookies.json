@@ -1,0 +1,31 @@
+[
+  {
+    "name": "auth0.BORNEM5ohaRO2grNM94ZkmhPD00EmIbs.is.authenticated",
+    "value": "true",
+    "domain": "app.quotefactory.com",
+    "path": "/",
+    "expires": 1762720613,
+    "size": 59,
+    "httpOnly": false,
+    "secure": true,
+    "session": false,
+    "sameSite": "None",
+    "priority": "Medium",
+    "sameParty": false,
+    "sourceScheme": "Secure"
+  },
+  {
+    "name": "_legacy_auth0.BORNEM5ohaRO2grNM94ZkmhPD00EmIbs.is.authenticated",
+    "value": "true",
+    "domain": "app.quotefactory.com",
+    "path": "/",
+    "expires": 1762720613,
+    "size": 67,
+    "httpOnly": false,
+    "secure": true,
+    "session": false,
+    "priority": "Medium",
+    "sameParty": false,
+    "sourceScheme": "Secure"
+  }
+]
