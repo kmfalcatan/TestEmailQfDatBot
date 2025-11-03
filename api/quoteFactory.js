@@ -22,6 +22,6 @@ console.log('✅ Logged into QuoteFactory');
 const loadRef = loadReference;
 await page.goto(`https://app.quotefactory.com/load/${loadRef}`, {
   waitUntil: 'networkidle2',
-  timeout: 6000000,
+  timeout: 60000,
 });
 console.log(`📦 Viewing load ${loadRef}`);

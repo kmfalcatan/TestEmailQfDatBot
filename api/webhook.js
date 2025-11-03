@@ -1,4 +1,4 @@
-// api/webhook.js - Fixed Puppeteer with @sparticuz/chromium
+// api/webhook.js - Fixed with better Auth0 handling
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
 
@@ -160,10 +160,13 @@ class LoadAutomationEnhanced {
             this.page.setDefaultTimeout(20000);
             this.page.setDefaultNavigationTimeout(20000);
             
+            // Go to main app first (may trigger login redirect)
             await this.page.goto('https://app.quotefactory.com', {
                 waitUntil: 'domcontentloaded',
                 timeout: 20000
             });
+            
+            await new Promise(resolve => setTimeout(resolve, 3000));
             
             console.log('Current URL:', this.page.url());
             
@@ -173,55 +176,120 @@ class LoadAutomationEnhanced {
             }
             
             console.log('🔄 Need to perform login...');
-            await this.page.waitForTimeout(3000);
+            
+            // Wait for login form - could be in main page or iframe
+            try {
+                await Promise.race([
+                    this.page.waitForSelector('input[type="email"]', { timeout: 10000 }),
+                    this.page.waitForSelector('input#1-email', { timeout: 10000 }),
+                    this.page.waitForSelector('.auth0-lock-widget', { timeout: 10000 })
+                ]);
+                console.log('✅ Login form detected');
+            } catch (err) {
+                console.log('⚠️  No login form found yet, checking iframes...');
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 2000));
             
             try {
                 let loginSuccess = false;
+                let targetContext = this.page;
                 
-                // Method 1: Direct form fields
-                try {
-                    await this.page.waitForSelector('input[type="email"], input[name="username"]', { timeout: 10000 });
-                    const emailField = await this.page.$('input[type="email"], input[name="username"]');
-                    const passwordField = await this.page.$('input[type="password"]');
-                    
-                    if (emailField && passwordField) {
-                        console.log('📝 Filling credentials...');
-                        await emailField.type(username);
-                        await passwordField.type(password);
-                        await this.page.keyboard.press('Enter');
-                        loginSuccess = true;
-                    }
-                } catch (e) {
-                    console.log('⚠️ Direct form method failed:', e.message);
-                }
+                // Method 1: Try main page first
+                const emailSelectors = [
+                    'input#1-email',
+                    'input[type="email"]',
+                    'input[name="username"]',
+                    'input[name="email"]'
+                ];
                 
-                // Method 2: Auth0 iframe (simplified for Puppeteer)
-                if (!loginSuccess) {
+                let emailField = null;
+                let passwordField = null;
+                
+                // Try main page
+                for (const selector of emailSelectors) {
                     try {
-                        console.log('🔍 Trying Auth0 iframe...');
-                        const frames = await this.page.frames();
-                        
-                        for (const frame of frames) {
-                            const frameUrl = frame.url();
-                            if (frameUrl.includes('auth0.com')) {
-                                console.log('Found Auth0 frame:', frameUrl);
-                                
-                                await frame.waitForSelector('input[type="email"], input[name="username"]', { timeout: 5000 });
-                                const emailField = await frame.$('input[type="email"], input[name="username"]');
-                                const passwordField = await frame.$('input[type="password"]');
-                                
-                                if (emailField && passwordField) {
-                                    await emailField.type(username);
-                                    await passwordField.type(password);
-                                    await frame.keyboard.press('Enter');
-                                    loginSuccess = true;
-                                    break;
-                                }
-                            }
+                        emailField = await this.page.$(selector);
+                        if (emailField) {
+                            console.log(`📝 Found email field in main page: ${selector}`);
+                            passwordField = await this.page.$('input[type="password"]');
+                            break;
                         }
                     } catch (e) {
-                        console.log('⚠️ Auth0 iframe method failed:', e.message);
+                        continue;
                     }
+                }
+                
+                // Method 2: Try Auth0 iframe if not found in main page
+                if (!emailField) {
+                    console.log('🔍 Trying Auth0 iframe...');
+                    const frames = await this.page.frames();
+                    
+                    for (const frame of frames) {
+                        const frameUrl = frame.url();
+                        if (frameUrl.includes('auth0.com')) {
+                            console.log('Found Auth0 frame:', frameUrl);
+                            
+                            try {
+                                await frame.waitForSelector('input[type="email"], input[name="username"]', { timeout: 5000 });
+                                emailField = await frame.$('input[type="email"], input[name="username"]');
+                                passwordField = await frame.$('input[type="password"]');
+                                
+                                if (emailField && passwordField) {
+                                    targetContext = frame;
+                                    console.log('📝 Found login fields in iframe');
+                                    break;
+                                }
+                            } catch (e) {
+                                console.log('⚠️  No login form in this Auth0 frame');
+                                continue;
+                            }
+                        }
+                    }
+                }
+                
+                if (emailField && passwordField) {
+                    console.log('📝 Filling credentials...');
+                    await emailField.click({ clickCount: 3 });
+                    await emailField.type(username, { delay: 50 });
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
+                    await passwordField.click({ clickCount: 3 });
+                    await passwordField.type(password, { delay: 50 });
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
+                    // Try to find and click submit button
+                    const submitSelectors = [
+                        'button[type="submit"]',
+                        'button[name="submit"]',
+                        'button[name="action"]',
+                        '.auth0-lock-submit'
+                    ];
+                    
+                    let submitted = false;
+                    for (const selector of submitSelectors) {
+                        try {
+                            const submitBtn = await targetContext.$(selector);
+                            if (submitBtn) {
+                                await submitBtn.click();
+                                submitted = true;
+                                console.log('✅ Clicked submit button');
+                                break;
+                            }
+                        } catch (e) {
+                            continue;
+                        }
+                    }
+                    
+                    if (!submitted) {
+                        console.log('⚠️  No submit button, pressing Enter');
+                        await targetContext.keyboard.press('Enter');
+                    }
+                    
+                    loginSuccess = true;
+                } else {
+                    console.log('❌ Could not find login fields');
+                    return false;
                 }
                 
                 if (!loginSuccess) {
@@ -230,7 +298,7 @@ class LoadAutomationEnhanced {
                 }
                 
                 console.log('⏳ Waiting for login to complete...');
-                await this.page.waitForTimeout(8000);
+                await new Promise(resolve => setTimeout(resolve, 8000));
                 
                 const currentUrl = this.page.url();
                 console.log('Post-login URL:', currentUrl);
@@ -239,6 +307,19 @@ class LoadAutomationEnhanced {
                     console.log('✅ Login successful!');
                     return true;
                 } else {
+                    // Try navigating to dashboard
+                    console.log('🔄 Attempting to navigate to dashboard...');
+                    await this.page.goto('https://app.quotefactory.com/broker/dashboard', {
+                        waitUntil: 'domcontentloaded',
+                        timeout: 15000
+                    });
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    
+                    if (this.page.url().includes('/broker/dashboard')) {
+                        console.log('✅ Successfully navigated to dashboard!');
+                        return true;
+                    }
+                    
                     console.log('❌ Login may have failed - not on dashboard');
                     return false;
                 }
@@ -260,14 +341,14 @@ class LoadAutomationEnhanced {
             
             // Try keyboard shortcut search
             await this.page.keyboard.press('/');
-            await this.page.waitForTimeout(2000);
+            await new Promise(resolve => setTimeout(resolve, 2000));
             
             // Look for focused input
             const searchInput = await this.page.$('input:focus');
             if (searchInput) {
                 console.log('✅ Search input found');
                 await searchInput.type(loadReference);
-                await this.page.waitForTimeout(4000);
+                await new Promise(resolve => setTimeout(resolve, 4000));
                 
                 try {
                     // Try to click on the search result
@@ -277,7 +358,7 @@ class LoadAutomationEnhanced {
                     await this.page.keyboard.press('Enter');
                 }
                 
-                await this.page.waitForTimeout(6000);
+                await new Promise(resolve => setTimeout(resolve, 6000));
                 
                 // Extract load information
                 const loadData = await this.page.evaluate(() => {
@@ -402,6 +483,7 @@ Automated response - Please reply with DAT reference number`
 }
 
 export { LoadAutomationEnhanced };
+
 // VERCEL SERVERLESS HANDLER
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
@@ -448,31 +530,6 @@ export default async function handler(req, res) {
                     await automation.cleanup();
                 } else {
                     console.log('❌ Browser initialization failed - using intelligent fallback response');
-                    console.log('🔍 Attempting HTTP-based QuoteFactory check...');
-                    
-                    // Try a simple HTTP check to see if load exists
-                    try {
-                        const response = await fetch(`https://app.quotefactory.com/api/loads/search?q=${loadReference}`, {
-                            headers: {
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                            },
-                            timeout: 5000
-                        });
-                        
-                        if (response.ok) {
-                            console.log('✅ Load exists in QuoteFactory (HTTP check)');
-                            // Set a flag that we found the load but couldn't scrape details
-                            loadInfo = { 
-                                exists: true, 
-                                pickup: 'Details being retrieved...', 
-                                delivery: 'Details being retrieved...',
-                                weight: 'TBD',
-                                rate: 'Quote being prepared...'
-                            };
-                        }
-                    } catch (error) {
-                        console.log('ℹ️ HTTP check failed, using standard fallback');
-                    }
                 }
             } else {
                 console.log('⚠️ No QuoteFactory credentials - using basic response');
