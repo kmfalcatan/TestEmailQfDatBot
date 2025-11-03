@@ -22,5 +22,8 @@
   "author": "Ed Mangino",
   "license": "MIT",
   "main": "index.js",
-  "keywords": []
+  "keywords": [],
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
 }

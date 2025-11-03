@@ -1,12 +1,13 @@
-// testPuppeteer.js - Complete version with better timeout handling
+// testPuppeteer.js - Complete version with improved extraction
+import "dotenv/config";
 import fs from "fs/promises";
 import puppeteer from "puppeteer";
 
 const COOKIES_PATH = "./cookies.json";
 const DASHBOARD_URL = "https://app.quotefactory.com/broker/dashboard";
 
-const USERNAME = process.env.QF_USERNAME || "emangino@harnesstogo.com";
-const PASSWORD = process.env.QF_PASSWORD || "GoBirds143$";
+const USERNAME = process.env.QF_USERNAME;
+const PASSWORD = process.env.QF_PASSWORD;
 
 async function loadCookies() {
   try {
@@ -34,10 +35,8 @@ async function isLoggedIn(page) {
   
   if (url.includes('/broker/dashboard') || url.includes('app.quotefactory.com')) {
     try {
-      // Wait a bit for page to load
       await new Promise(resolve => setTimeout(resolve, 2000));
       
-      // Check for dashboard content
       const hasDashboard = await page.evaluate(() => {
         const text = document.body.textContent || '';
         const hasNav = document.querySelector('nav, header, [role="navigation"]');
@@ -63,33 +62,29 @@ async function loginWithForm(page) {
   
   try {
     await page.goto('https://app.quotefactory.com', { 
-      waitUntil: "load",  // Changed to 'load' instead of 'domcontentloaded'
-      timeout: 90000      // Increased to 90 seconds
+      waitUntil: "load",
+      timeout: 90000
     });
     console.log("✅ Page loaded");
   } catch (err) {
     console.log("⚠️  Navigation timeout, but continuing...");
-    // Don't throw, just continue
   }
 
-  // Wait a bit for page to settle
   await new Promise(resolve => setTimeout(resolve, 5000));
 
   console.log("⏳ Waiting for Auth0 Lock to load...");
   
   try {
-    await page.waitForSelector('.auth0-lock-widget', { timeout: 20000 });
+    await page.waitForSelector('.auth0-lock-widget', { timeout: 60000 });
     console.log("✅ Auth0 Lock widget loaded");
   } catch (err) {
     console.log("⚠️  Auth0 Lock widget not found, checking if already logged in...");
     
-    // Maybe we're already logged in?
     if (await isLoggedIn(page)) {
       console.log("✅ Already logged in!");
       return true;
     }
     
-    await page.screenshot({ path: "login-page-error.png", fullPage: true });
     throw new Error("Auth0 Lock widget did not load and not logged in");
   }
 
@@ -191,7 +186,6 @@ async function loginWithForm(page) {
   await page.click(submitButton);
   console.log("✅ Submit button clicked");
   
-  // Don't wait for navigation, just wait a fixed time
   console.log("⏳ Waiting for login to process...");
   await new Promise(resolve => setTimeout(resolve, 10000));
   
@@ -200,13 +194,11 @@ async function loginWithForm(page) {
   console.log("Current URL:", page.url());
   
   if (!logged) {
-    console.log("⚠️  Not on dashboard yet, taking screenshot");
-    await page.screenshot({ path: "after-login-attempt.png", fullPage: true });
+    console.log("⚠️  Not on dashboard yet");
   } else {
-  console.log("✅ Logged in successfully!");
-  await saveCookies(page);
-  return true; // <--- add this line
-}
+    console.log("✅ Logged in successfully!");
+    await saveCookies(page);
+  }
   
   return logged;
 }
@@ -216,7 +208,6 @@ async function searchLoad(page, reference) {
   console.log(`\n🔎 Searching for load reference: ${reference}`);
 
   try {
-    // Step 1: Open search
     console.log("⌨️  Opening search with Ctrl+K...");
     await page.keyboard.down('Control');
     await page.keyboard.press('KeyK');
@@ -224,7 +215,6 @@ async function searchLoad(page, reference) {
     
     await new Promise(resolve => setTimeout(resolve, 2000));
     
-    // Step 2: Wait for search field
     console.log("⏳ Waiting for search field...");
     
     let searchFieldFound = false;
@@ -236,7 +226,6 @@ async function searchLoad(page, reference) {
       console.log("⚠️  Ctrl+K didn't work, trying to click search button...");
     }
     
-    // If Ctrl+K didn't work, try clicking the button
     if (!searchFieldFound) {
       try {
         await page.evaluate(() => {
@@ -257,7 +246,6 @@ async function searchLoad(page, reference) {
         searchFieldFound = true;
       } catch (err) {
         console.log("❌ Could not open search");
-        await page.screenshot({ path: "search-not-opened.png", fullPage: true });
       }
     }
     
@@ -267,121 +255,135 @@ async function searchLoad(page, reference) {
     
     console.log("✅ Search field is ready!");
     
-    // Step 3: Type the reference
     console.log(`⌨️  Typing load reference: ${reference}`);
     await page.click('#search_field', { clickCount: 3 });
     await page.type('#search_field', reference, { delay: 100 });
     console.log(`✅ Typed: ${reference}`);
     
-    // Take screenshot of search box with text
-    await page.screenshot({ path: "search-typed.png", fullPage: true });
-    console.log("📸 Screenshot: search-typed.png");
-    
-    // Step 4: Press Enter
     console.log("⏎ Pressing Enter to search...");
     await page.keyboard.press('Enter');
     console.log("✅ Enter pressed");
     
-    // Step 5: Wait for page to change/load
     console.log("⏳ Waiting for search results to load...");
     await new Promise(resolve => setTimeout(resolve, 8000));
-    
-    // Take screenshot of results
-    await page.screenshot({ path: "search-results.png", fullPage: true });
-    console.log("📸 Screenshot: search-results.png");
-    
-    // Step 6: Show what's actually on the page
-    console.log("\n📄 Analyzing page content...");
-    
-    const pageAnalysis = await page.evaluate(() => {
-      const bodyText = document.body.innerText;
-      const allText = bodyText.substring(0, 3000);
-      
-      const hasPickup = bodyText.toLowerCase().includes('pickup');
-      const hasDelivery = bodyText.toLowerCase().includes('delivery');
-      const hasWeight = bodyText.toLowerCase().includes('weight');
-      const hasRate = bodyText.toLowerCase().includes('rate');
-      const hasLoad = bodyText.toLowerCase().includes('load');
-      
-      const currentUrl = window.location.href;
-      
-      const loadElements = {
-        divs: document.querySelectorAll('div').length,
-        spans: document.querySelectorAll('span').length,
-        paragraphs: document.querySelectorAll('p').length,
-        hasTable: !!document.querySelector('table'),
-        hasForm: !!document.querySelector('form')
-      };
-      
-      return {
-        currentUrl,
-        allText,
-        keywords: { hasPickup, hasDelivery, hasWeight, hasRate, hasLoad },
-        elements: loadElements
-      };
-    });
-    
-    console.log("\n🌐 Current URL:", pageAnalysis.currentUrl);
-    console.log("\n🔑 Keywords found:");
-    console.log("  - Pickup:", pageAnalysis.keywords.hasPickup ? "✅" : "❌");
-    console.log("  - Delivery:", pageAnalysis.keywords.hasDelivery ? "✅" : "❌");
-    console.log("  - Weight:", pageAnalysis.keywords.hasWeight ? "✅" : "❌");
-    console.log("  - Rate:", pageAnalysis.keywords.hasRate ? "✅" : "❌");
-    console.log("  - Load:", pageAnalysis.keywords.hasLoad ? "✅" : "❌");
-    
-    console.log("\n📊 Page elements:");
-    console.log("  - Divs:", pageAnalysis.elements.divs);
-    console.log("  - Spans:", pageAnalysis.elements.spans);
-    console.log("  - Has table:", pageAnalysis.elements.hasTable);
-    
-    console.log("\n📄 FULL PAGE TEXT (first 3000 chars):");
-    console.log("=====================================");
-    console.log(pageAnalysis.allText);
-    console.log("=====================================");
 
-    // Step 7: Try to extract with better patterns
+    console.log("\n📄 Extracting load information...");
+    
+    // Extract all the load information from the page
     const loadInfo = await page.evaluate(() => {
       const text = document.body.innerText;
       
-      const pickupMatch = text.match(/(?:Pickup|Origin|From)[:\s]*([^\n]{10,80})/i);
-      const deliveryMatch = text.match(/(?:Delivery|Destination|To)[:\s]*([^\n]{10,80})/i);
-      const weightMatch = text.match(/(?:Weight|Pounds|lbs)[:\s]*([^\n]{5,30})/i);
-      const rateMatch = text.match(/(?:Rate|Price|Cost)[:\s]*\$?([^\n]{3,20})/i);
+      // Extract load reference
+      const refMatch = text.match(/Shipments[\s\n]+(\d+)/i) || text.match(/(\d{6})/);
+      const loadReference = refMatch ? refMatch[1] : "N/A";
+      
+      // Extract status
+      const statusMatch = text.match(/(Booked|Requested|Scheduled|In transit)/i);
+      const status = statusMatch ? statusMatch[1] : "N/A";
+      
+      // Extract ALL dates (pickup and delivery)
+      const dateMatches = text.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun)/gi);
+      const pickupDate = dateMatches && dateMatches[0] ? dateMatches[0] : "N/A";
+      const deliveryDate = dateMatches && dateMatches[1] ? dateMatches[1] : "N/A";
+      
+      // Extract customer
+      const customerMatch = text.match(/\$[\d,]+\.?\d*\s*\n\s*([^\n]+)\s*\n\s*[A-Z]{2}/);
+      const customer = customerMatch ? customerMatch[1].trim() : "N/A";
+      
+      // Extract rate
+      const rateMatch = text.match(/\$[\d,]+\.?\d*/);
+      const rate = rateMatch ? rateMatch[0] : "N/A";
+      
+      // Extract ALL city, state pairs (for pickup and delivery)
+      const locationMatches = Array.from(text.matchAll(/([^\n]{3,40})\s*\n\s*([A-Z]{2})\b/g));
+      
+      let pickup = "N/A";
+      let delivery = "N/A";
+      
+      if (locationMatches.length >= 2) {
+        // First location is pickup
+        const pickupCity = locationMatches[0][1].trim();
+        const pickupState = locationMatches[0][2];
+        pickup = `${pickupCity}, ${pickupState}`;
+        
+        // Second location is delivery
+        const deliveryCity = locationMatches[1][1].trim();
+        const deliveryState = locationMatches[1][2];
+        delivery = `${deliveryCity}, ${deliveryState}`;
+      } else if (locationMatches.length === 1) {
+        // Only one location found (pickup)
+        const pickupCity = locationMatches[0][1].trim();
+        const pickupState = locationMatches[0][2];
+        pickup = `${pickupCity}, ${pickupState}`;
+      }
+      
+      // Extract weight
+      const weightMatch = text.match(/([\d,]+)\s*lb/i);
+      const weight = weightMatch ? `${weightMatch[1]} lbs` : "N/A";
+      
+      // Extract equipment type
+      const equipmentMatch = text.match(/(Other|Dry Van|Reefer|Flatbed)/i);
+      const equipment = equipmentMatch ? equipmentMatch[1] : "N/A";
+      
+      // Extract carrier
+      const carrierMatch = text.match(/No carrier|([A-Z][^\n]+LLC|[A-Z][^\n]+Inc)/);
+      const carrier = carrierMatch ? (carrierMatch[0] === "No carrier" ? "No carrier assigned" : carrierMatch[1]) : "N/A";
       
       return { 
-        pickup: pickupMatch?.[1]?.trim() || "N/A",
-        delivery: deliveryMatch?.[1]?.trim() || "N/A",
-        weight: weightMatch?.[1]?.trim() || "N/A",
-        rate: rateMatch?.[1]?.trim() || "N/A"
+        loadReference,
+        status,
+        pickupDate,
+        deliveryDate,
+        customer,
+        rate,
+        pickup,
+        delivery,
+        weight,
+        equipment,
+        carrier
       };
     });
 
     console.log("\n📦 EXTRACTED LOAD INFO:");
-    console.log("  Pickup:", loadInfo.pickup);
-    console.log("  Delivery:", loadInfo.delivery);
-    console.log("  Weight:", loadInfo.weight);
+    console.log("  Load Reference:", loadInfo.loadReference);
+    console.log("  Status:", loadInfo.status);
+    console.log("  Pickup Date:", loadInfo.pickupDate);
+    console.log("  Pickup Location:", loadInfo.pickup);
+    console.log("  Delivery Date:", loadInfo.deliveryDate);
+    console.log("  Delivery Location:", loadInfo.delivery);
+    console.log("  Customer:", loadInfo.customer);
     console.log("  Rate:", loadInfo.rate);
+    console.log("  Weight:", loadInfo.weight);
+    console.log("  Equipment:", loadInfo.equipment);
+    console.log("  Carrier:", loadInfo.carrier);
 
-    const formatted = `
-📦 LOAD DETAILS (Load ${reference}):
-- Pickup: ${loadInfo.pickup}
-- Delivery: ${loadInfo.delivery}
+    const formatted = `Hello,
+
+Thank you for your inquiry about load ${loadInfo.loadReference}. Here are the details:
+
+📦 LOAD DETAILS:
+- Pickup: ${loadInfo.pickup}, ${loadInfo.pickupDate}
+- Delivery: ${loadInfo.delivery}, ${loadInfo.deliveryDate}
 - Weight: ${loadInfo.weight}
 - Rate: ${loadInfo.rate}
 
 🚛 CAPACITY INQUIRY:
 When and where will you be empty for pickup?
+
+Best regards,
+Balto Booking
+
+---
+Automated response with live QuoteFactory data
     `.trim();
 
-    console.log("\n🧾 Formatted Output:\n");
+    console.log("\n🧾 FORMATTED OUTPUT:");
     console.log(formatted);
     
-    return { loadInfo, formatted, pageText: pageAnalysis.allText };
+    return { loadInfo, formatted };
     
   } catch (err) {
     console.error(`❌ Error during load search:`, err.message);
-    await page.screenshot({ path: "search-error.png", fullPage: true });
-    console.log("📸 Error screenshot: search-error.png");
     return null;
   }
 }
@@ -396,89 +398,76 @@ When and where will you be empty for pickup?
   });
   const page = await browser.newPage();
 
-  console.log("🌐 Starting QuoteFactory automation...");
+  console.log("🌐 Navigating to QuoteFactory...");
   
-  // Try with cookies first
   const cookies = await loadCookies();
   if (cookies && cookies.length > 0) {
-    console.log("🍪 Found saved cookies, applying...");
+    console.log("🍪 Found cookies, applying...");
     try {
       await page.setCookie(...cookies);
-      console.log("✅ Cookies applied");
     } catch (err) {
-      console.warn("⚠️  Failed to set cookies:", err.message);
-    }
-    
-    // Try to go to dashboard with cookies
-    try {
-      await page.goto(DASHBOARD_URL, { 
-        waitUntil: "domcontentloaded",
-        timeout: 60000 
-      });
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      
-      if (await isLoggedIn(page)) {
-        console.log("✅ Logged in via cookies!");
-        
-        // Search for load
-        let loadReference = process.argv[2] || "289926";
-        const result = await searchLoad(page, loadReference);
-        
-        if (result) {
-          console.log("\n✅ ✅ ✅ Load search completed!");
-        }
-        
-        await page.screenshot({ path: "final-state.png", fullPage: true });
-        console.log("\n✨ Done! Browser will stay open for 30 seconds.");
-        await new Promise(resolve => setTimeout(resolve, 30000));
-        await browser.close();
-        return;
-      }
-    } catch (err) {
-      console.log("⚠️  Cookies didn't work, will try login form");
+      console.warn("⚠️ Failed to set cookies:", err.message);
     }
   }
 
-  // If cookies didn't work, do fresh login
-  console.log("\n🔐 Performing fresh login...");
-  const loggedIn = await loginWithForm(page);
+  console.log("⏳ Checking login status...");
   
-  if (loggedIn) {
-    console.log("\n✅ Successfully logged in!");
+  try {
+    await page.goto(DASHBOARD_URL, { 
+      waitUntil: "load",
+      timeout: 90000 
+    });
+  } catch (err) {
+    console.log("⚠️  Navigation timeout (continuing anyway)");
+  }
+  
+  await new Promise(resolve => setTimeout(resolve, 3000));
+
+  let loggedIn = await isLoggedIn(page);
+  
+  if (!loggedIn) {
+    console.log("🔁 Cookies invalid or absent — performing form login");
+    loggedIn = await loginWithForm(page);
     
-    // Navigate to dashboard
-    try {
-      await page.goto(DASHBOARD_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
-      await new Promise(resolve => setTimeout(resolve, 3000));
-    } catch (err) {
-      console.log("⚠️  Dashboard navigation issue");
+    if (loggedIn) {
+      console.log("✅ Login successful, navigating to dashboard...");
+      try {
+        await page.goto(DASHBOARD_URL, { waitUntil: "load", timeout: 60000 });
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      } catch (err) {
+        console.log("⚠️  Dashboard navigation timeout");
+      }
     }
-    
-    // Search for load
-    let loadReference = process.argv[2] || "289926";
-    console.log(`\n🎯 Searching for load: ${loadReference}`);
-    
+  } else {
+    console.log("✅ Logged in via saved cookies");
+  }
+
+  if (loggedIn) {
+    let loadReference = process.argv[2];
+    if (!loadReference) {
+      console.log("⚠️  No load reference provided");
+      console.log("Usage: node testPuppeteer.js 298986");
+      loadReference = "298986";
+      console.log(`Using default: ${loadReference}`);
+    }
+
     const result = await searchLoad(page, loadReference);
     
     if (result) {
-      console.log("\n✅ ✅ ✅ Load search completed!");
+      console.log("\n✅ ✅ ✅ Load search completed successfully!");
     } else {
-      console.log("\n⚠️  Could not complete load search");
+      console.log("\n⚠️  Could not extract complete load data");
     }
   } else {
-    console.log("\n❌ Login failed");
-    console.log("Check login-state.png and after-login.png screenshots");
+    console.log("\n❌ Login failed - cannot search for loads");
   }
 
-  await page.screenshot({ path: "final-state.png", fullPage: true });
-  console.log("\n📸 Final screenshot: final-state.png");
   console.log("\n✨ Done! Browser will stay open for 30 seconds.");
   await new Promise(resolve => setTimeout(resolve, 30000));
   
   await browser.close();
   console.log("👋 Browser closed");
 })().catch(error => {
-  console.error("\n❌ Script failed:", error.message);
-  console.error(error.stack);
+  console.error("❌ Script failed:", error);
   process.exit(1);
 });
