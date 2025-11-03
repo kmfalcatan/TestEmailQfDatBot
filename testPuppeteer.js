@@ -1,4 +1,4 @@
-// testPuppeteer.js - Complete version with improved extraction
+// testPuppeteer.js - Fixed version with better auth detection
 import "dotenv/config";
 import fs from "fs/promises";
 import puppeteer from "puppeteer";
@@ -62,55 +62,107 @@ async function loginWithForm(page) {
   
   try {
     await page.goto('https://app.quotefactory.com', { 
-      waitUntil: "load",
+      waitUntil: "networkidle2",
       timeout: 90000
     });
     console.log("✅ Page loaded");
   } catch (err) {
-    console.log("⚠️  Navigation timeout, but continuing...");
+    console.log("⚠️  Navigation issue:", err.message);
   }
 
-  await new Promise(resolve => setTimeout(resolve, 5000));
+  // Wait longer for page to settle
+  console.log("⏳ Waiting for page to fully load...");
+  await new Promise(resolve => setTimeout(resolve, 8000));
 
-  console.log("⏳ Waiting for Auth0 Lock to load...");
+  // Check if we're already logged in
+  if (await isLoggedIn(page)) {
+    console.log("✅ Already logged in!");
+    return true;
+  }
+
+  console.log("🔍 Looking for login form elements...");
   
+  // Try multiple approaches to find the login form
+  let loginFormFound = false;
+  let emailInput = null;
+  let passwordInput = null;
+  
+  // Approach 1: Look for Auth0 Lock widget
   try {
-    await page.waitForSelector('.auth0-lock-widget', { timeout: 60000 });
-    console.log("✅ Auth0 Lock widget loaded");
+    await page.waitForSelector('.auth0-lock-widget', { timeout: 10000 });
+    console.log("✅ Auth0 Lock widget found");
+    loginFormFound = true;
   } catch (err) {
-    console.log("⚠️  Auth0 Lock widget not found, checking if already logged in...");
-    
-    if (await isLoggedIn(page)) {
-      console.log("✅ Already logged in!");
-      return true;
+    console.log("⚠️  Auth0 Lock widget not found, trying alternative selectors...");
+  }
+  
+  // Approach 2: Look for any login form elements
+  if (!loginFormFound) {
+    try {
+      await page.waitForFunction(() => {
+        const emailInputs = document.querySelectorAll('input[type="email"], input[type="text"], input[name="email"], input[name="username"]');
+        const passwordInputs = document.querySelectorAll('input[type="password"]');
+        return emailInputs.length > 0 && passwordInputs.length > 0;
+      }, { timeout: 15000 });
+      console.log("✅ Login form elements found");
+      loginFormFound = true;
+    } catch (err) {
+      console.log("⚠️  Login form elements not found");
     }
+  }
+  
+  // Approach 3: Check if we're on auth0 page and wait for it to load
+  if (!loginFormFound && page.url().includes('auth.quotefactory.com')) {
+    console.log("🔄 On Auth0 page, waiting for form to render...");
+    await new Promise(resolve => setTimeout(resolve, 10000));
     
-    throw new Error("Auth0 Lock widget did not load and not logged in");
+    // Check again for form elements
+    const hasForm = await page.evaluate(() => {
+      const emailInputs = document.querySelectorAll('input[type="email"], input[type="text"]');
+      const passwordInputs = document.querySelectorAll('input[type="password"]');
+      return emailInputs.length > 0 && passwordInputs.length > 0;
+    });
+    
+    if (hasForm) {
+      console.log("✅ Form loaded after waiting");
+      loginFormFound = true;
+    }
+  }
+  
+  if (!loginFormFound) {
+    throw new Error("Login form not found after multiple attempts");
   }
 
-  await new Promise(resolve => setTimeout(resolve, 3000));
-
+  // Find email input with multiple selectors
   console.log("🔍 Looking for email input field...");
-  
   const emailSelectors = [
     'input[type="email"]',
     'input[name="email"]',
     'input[name="username"]',
-    'input#1-email',
-    '.auth0-lock-input[type="email"]'
+    'input[id*="email"]',
+    'input[placeholder*="email" i]',
+    'input[placeholder*="username" i]',
+    '.auth0-lock-input[type="email"]',
+    'input[type="text"]'
   ];
 
-  let emailInput = null;
   for (const selector of emailSelectors) {
     try {
       const element = await page.$(selector);
       if (element) {
-        emailInput = selector;
-        console.log(`✅ Found email input with selector: ${selector}`);
-        break;
+        const isVisible = await page.evaluate(el => {
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+        }, element);
+        
+        if (isVisible) {
+          emailInput = selector;
+          console.log(`✅ Found visible email input with selector: ${selector}`);
+          break;
+        }
       }
     } catch (err) {
-      console.log(`⚠️  Selector ${selector} not found, trying next...`);
+      // Continue trying other selectors
     }
   }
 
@@ -118,31 +170,42 @@ async function loginWithForm(page) {
     throw new Error("Email input not found");
   }
 
-  console.log("🖊️ Filling credentials...");
-  
+  console.log("🖊️ Filling email...");
+  await page.waitForSelector(emailInput, { visible: true, timeout: 5000 });
   await page.click(emailInput, { clickCount: 3 });
+  await new Promise(resolve => setTimeout(resolve, 500));
   await page.type(emailInput, USERNAME, { delay: 100 });
   console.log("✅ Email filled");
 
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  await new Promise(resolve => setTimeout(resolve, 1500));
 
+  // Find password input
+  console.log("🔍 Looking for password input field...");
   const passwordSelectors = [
     'input[type="password"]',
     'input[name="password"]',
+    'input[id*="password"]',
+    'input[placeholder*="password" i]',
     '.auth0-lock-input[type="password"]'
   ];
 
-  let passwordInput = null;
   for (const selector of passwordSelectors) {
     try {
       const element = await page.$(selector);
       if (element) {
-        passwordInput = selector;
-        console.log(`✅ Found password input with selector: ${selector}`);
-        break;
+        const isVisible = await page.evaluate(el => {
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+        }, element);
+        
+        if (isVisible) {
+          passwordInput = selector;
+          console.log(`✅ Found visible password input with selector: ${selector}`);
+          break;
+        }
       }
     } catch (err) {
-      console.log(`⚠️  Selector ${selector} not found, trying next...`);
+      // Continue trying other selectors
     }
   }
 
@@ -150,17 +213,26 @@ async function loginWithForm(page) {
     throw new Error("Password input not found");
   }
 
+  console.log("🖊️ Filling password...");
+  await page.waitForSelector(passwordInput, { visible: true, timeout: 5000 });
   await page.click(passwordInput, { clickCount: 3 });
+  await new Promise(resolve => setTimeout(resolve, 500));
   await page.type(passwordInput, PASSWORD, { delay: 100 });
   console.log("✅ Password filled");
 
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  await new Promise(resolve => setTimeout(resolve, 1500));
 
+  // Find submit button
+  console.log("🔍 Looking for submit button...");
   const submitSelectors = [
     'button[type="submit"]',
     'button[name="submit"]',
     'button[name="action"]',
-    '.auth0-lock-submit'
+    'input[type="submit"]',
+    '.auth0-lock-submit',
+    'button:has-text("Log in")',
+    'button:has-text("Sign in")',
+    'button:has-text("Continue")'
   ];
 
   let submitButton = null;
@@ -168,12 +240,41 @@ async function loginWithForm(page) {
     try {
       const element = await page.$(selector);
       if (element) {
-        submitButton = selector;
-        console.log(`✅ Found submit button with selector: ${selector}`);
-        break;
+        const isVisible = await page.evaluate(el => {
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+        }, element);
+        
+        if (isVisible) {
+          submitButton = selector;
+          console.log(`✅ Found visible submit button with selector: ${selector}`);
+          break;
+        }
       }
     } catch (err) {
-      console.log(`⚠️  Selector ${selector} not found, trying next...`);
+      // Continue trying other selectors
+    }
+  }
+  
+  // Fallback: find button by text content
+  if (!submitButton) {
+    console.log("🔍 Trying to find submit button by text content...");
+    submitButton = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const submitBtn = buttons.find(btn => {
+        const text = btn.textContent.toLowerCase();
+        return text.includes('log in') || text.includes('sign in') || text.includes('continue') || text.includes('submit');
+      });
+      
+      if (submitBtn) {
+        submitBtn.setAttribute('data-puppeteer-submit', 'true');
+        return '[data-puppeteer-submit="true"]';
+      }
+      return null;
+    });
+    
+    if (submitButton) {
+      console.log("✅ Found submit button by text content");
     }
   }
 
@@ -182,25 +283,43 @@ async function loginWithForm(page) {
   }
 
   console.log("🔐 Submitting login form...");
-  
   await page.click(submitButton);
   console.log("✅ Submit button clicked");
   
   console.log("⏳ Waiting for login to process...");
-  await new Promise(resolve => setTimeout(resolve, 10000));
+  
+  // Wait for navigation or dashboard to appear
+  try {
+    await page.waitForNavigation({ timeout: 15000, waitUntil: 'networkidle2' });
+    console.log("✅ Navigation completed");
+  } catch (err) {
+    console.log("⚠️  Navigation wait timeout, checking login status anyway...");
+  }
+  
+  await new Promise(resolve => setTimeout(resolve, 5000));
   
   const logged = await isLoggedIn(page);
   
   console.log("Current URL:", page.url());
   
   if (!logged) {
-    console.log("⚠️  Not on dashboard yet");
+    console.log("⚠️  Not on dashboard yet, waiting a bit longer...");
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    const logged2 = await isLoggedIn(page);
+    
+    if (logged2) {
+      console.log("✅ Logged in successfully!");
+      await saveCookies(page);
+      return true;
+    } else {
+      console.log("❌ Login appears to have failed");
+      return false;
+    }
   } else {
     console.log("✅ Logged in successfully!");
     await saveCookies(page);
+    return true;
   }
-  
-  return logged;
 }
 
 // === IMPROVED: Function to search and extract load details ===
@@ -294,28 +413,42 @@ async function searchLoad(page, reference) {
       const rateMatch = text.match(/\$[\d,]+\.?\d*/);
       const rate = rateMatch ? rateMatch[0] : "N/A";
       
-      // Extract ALL city, state pairs (for pickup and delivery)
-      const locationMatches = Array.from(text.matchAll(/([^\n]{3,40})\s*\n\s*([A-Z]{2})\b/g));
-      
-      let pickup = "N/A";
-      let delivery = "N/A";
-      
-      if (locationMatches.length >= 2) {
-        // First location is pickup
-        const pickupCity = locationMatches[0][1].trim();
-        const pickupState = locationMatches[0][2];
-        pickup = `${pickupCity}, ${pickupState}`;
-        
-        // Second location is delivery
-        const deliveryCity = locationMatches[1][1].trim();
-        const deliveryState = locationMatches[1][2];
-        delivery = `${deliveryCity}, ${deliveryState}`;
-      } else if (locationMatches.length === 1) {
-        // Only one location found (pickup)
-        const pickupCity = locationMatches[0][1].trim();
-        const pickupState = locationMatches[0][2];
-        pickup = `${pickupCity}, ${pickupState}`;
-      }
+      // Detect PICK UP sections and extract their locations
+const pickupSections = Array.from(document.querySelectorAll('div.text-12.text-gray-800.font-semibold.tracking-wide.pr-4'))
+  .filter(div => div.textContent.trim().toUpperCase().includes('PICK UP'));
+
+const pickupLocations = pickupSections.map(section => {
+  const parent = section.closest('div');
+  if (!parent) return null;
+  const text = parent.innerText;
+  const match = text.match(/([A-Za-z\s]+),\s*([A-Z]{2})/);
+  return match ? `${match[1].trim()}, ${match[2]}` : null;
+}).filter(Boolean);
+
+let pickup = "N/A";
+let delivery = "N/A";
+
+if (pickupLocations.length > 1) {
+  // If there are multiple pickup locations
+  pickup = pickupLocations.join(' | '); // join them
+  delivery = pickup; // set the same string as delivery
+} else {
+  // Fallback to your previous regex-based logic
+  const locationMatches = Array.from(text.matchAll(/([^\n]{3,40})\s*\n\s*([A-Z]{2})\b/g));
+  if (locationMatches.length >= 2) {
+    const pickupCity = locationMatches[0][1].trim();
+    const pickupState = locationMatches[0][2];
+    pickup = `${pickupCity}, ${pickupState}`;
+    
+    const deliveryCity = locationMatches[1][1].trim();
+    const deliveryState = locationMatches[1][2];
+    delivery = `${deliveryCity}, ${deliveryState}`;
+  } else if (locationMatches.length === 1) {
+    const pickupCity = locationMatches[0][1].trim();
+    const pickupState = locationMatches[0][2];
+    pickup = `${pickupCity}, ${pickupState}`;
+  }
+}
       
       // Extract weight
       const weightMatch = text.match(/([\d,]+)\s*lb/i);
@@ -414,14 +547,14 @@ Automated response with live QuoteFactory data
   
   try {
     await page.goto(DASHBOARD_URL, { 
-      waitUntil: "load",
+      waitUntil: "networkidle2",
       timeout: 90000 
     });
   } catch (err) {
     console.log("⚠️  Navigation timeout (continuing anyway)");
   }
   
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
   let loggedIn = await isLoggedIn(page);
   
@@ -432,7 +565,7 @@ Automated response with live QuoteFactory data
     if (loggedIn) {
       console.log("✅ Login successful, navigating to dashboard...");
       try {
-        await page.goto(DASHBOARD_URL, { waitUntil: "load", timeout: 60000 });
+        await page.goto(DASHBOARD_URL, { waitUntil: "networkidle2", timeout: 60000 });
         await new Promise(resolve => setTimeout(resolve, 3000));
       } catch (err) {
         console.log("⚠️  Dashboard navigation timeout");
@@ -446,8 +579,8 @@ Automated response with live QuoteFactory data
     let loadReference = process.argv[2];
     if (!loadReference) {
       console.log("⚠️  No load reference provided");
-      console.log("Usage: node testPuppeteer.js 298986");
-      loadReference = "298986";
+      console.log("Usage: node testPuppeteer.js 282032");
+      loadReference = "282032";
       console.log(`Using default: ${loadReference}`);
     }
 
