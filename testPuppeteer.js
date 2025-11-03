@@ -1,11 +1,9 @@
-// testPuppeteer.js - FIXED with better waiting and debugging
+// testPuppeteer.js - Complete version with better timeout handling
 import fs from "fs/promises";
 import puppeteer from "puppeteer";
 
 const COOKIES_PATH = "./cookies.json";
-const LOGIN_URL = "https://auth.quotefactory.com/login?state=hKFo2SA3TnowdXl5dFVkYk9oMWZldlpVZEh0ZzRJc1VUMXNRN6FupWxvZ2luo3RpZNkgVzBpdjJGcnp2OUU3VzYtNXduZkVFT1RUNFoxZVpBeUqjY2lk2SBCT1JORU01b2hhUk8yZ3JOTTk0WmttaFBEMDBFbUlicw&client=BORNEM5ohaRO2grNM94ZkmhPD00EmIbs&protocol=oauth2&scope=openid%20profile%20email&audience=https%3A%2F%2Fapi.quotefactory.com&redirect_uri=https%3A%2F%2Fapp.quotefactory.com%2Fauth&response_type=code&response_mode=query&nonce=X01OTGJienBXamQwbjQ5dlFwNHpuZVJ3N2dDOGJZYkJIM1ZpOFhvR0lyZQ%3D%3D&code_challenge=YK9k8JtNKILBoo8RotWSFX1Ldj_MKA2qlqr8u1zCbYk&code_challenge_method=S256&auth0Client=eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjIuMS4zIn0%3D";
 const DASHBOARD_URL = "https://app.quotefactory.com/broker/dashboard";
-const LOGGED_IN_CHECK = ".auth0-lock-widget"; // Check if we're still on login page
 
 const USERNAME = process.env.QF_USERNAME || "emangino@harnesstogo.com";
 const PASSWORD = process.env.QF_PASSWORD || "GoBirds143$";
@@ -29,23 +27,31 @@ async function isLoggedIn(page) {
   const url = page.url();
   console.log("🔍 Checking URL:", url);
   
-  // If we're on auth page, definitely not logged in
   if (url.includes('auth.quotefactory.com')) {
     console.log("❌ Still on auth page - NOT logged in");
     return false;
   }
   
-  // If we're on dashboard, check for actual dashboard content
   if (url.includes('/broker/dashboard') || url.includes('app.quotefactory.com')) {
     try {
-      // Wait for dashboard elements to confirm we're really logged in
-      // This could be a navigation menu, user profile, or any dashboard-specific element
-      await page.waitForSelector('nav, header, [role="navigation"]', { timeout: 3000 });
-      console.log("✅ Dashboard elements found - LOGGED IN");
-      return true;
+      // Wait a bit for page to load
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Check for dashboard content
+      const hasDashboard = await page.evaluate(() => {
+        const text = document.body.textContent || '';
+        const hasNav = document.querySelector('nav, header, [role="navigation"]');
+        const hasButton = document.querySelector('button');
+        const hasSearchText = text.toLowerCase().includes('find');
+        return !!(hasNav || hasButton || hasSearchText);
+      });
+      
+      if (hasDashboard) {
+        console.log("✅ Dashboard elements found - LOGGED IN");
+        return true;
+      }
     } catch (err) {
-      console.log("⚠️  On app domain but no dashboard elements - NOT logged in");
-      return false;
+      console.log("⚠️  Could not verify dashboard - " + err.message);
     }
   }
   
@@ -54,81 +60,92 @@ async function isLoggedIn(page) {
 
 async function loginWithForm(page) {
   console.log("🌐 Navigating to login page...");
-  await page.goto(LOGIN_URL, { waitUntil: "networkidle2", timeout: 30000 });
+  
+  try {
+    await page.goto('https://app.quotefactory.com', { 
+      waitUntil: "load",  // Changed to 'load' instead of 'domcontentloaded'
+      timeout: 90000      // Increased to 90 seconds
+    });
+    console.log("✅ Page loaded");
+  } catch (err) {
+    console.log("⚠️  Navigation timeout, but continuing...");
+    // Don't throw, just continue
+  }
+
+  // Wait a bit for page to settle
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
   console.log("⏳ Waiting for Auth0 Lock to load...");
   
-  // Wait for the Auth0 Lock widget to appear
   try {
-    await page.waitForSelector('.auth0-lock-widget', { timeout: 15000 });
+    await page.waitForSelector('.auth0-lock-widget', { timeout: 20000 });
     console.log("✅ Auth0 Lock widget loaded");
   } catch (err) {
-    console.log("⚠️  Auth0 Lock widget not found, taking screenshot for debugging...");
+    console.log("⚠️  Auth0 Lock widget not found, checking if already logged in...");
+    
+    // Maybe we're already logged in?
+    if (await isLoggedIn(page)) {
+      console.log("✅ Already logged in!");
+      return true;
+    }
+    
     await page.screenshot({ path: "login-page-error.png", fullPage: true });
-    throw new Error("Auth0 Lock widget did not load");
+    throw new Error("Auth0 Lock widget did not load and not logged in");
   }
 
-  // Give it extra time to fully render
   await new Promise(resolve => setTimeout(resolve, 3000));
 
   console.log("🔍 Looking for email input field...");
   
-  // Try multiple possible selectors for email
   const emailSelectors = [
-    'input#1-email',
     'input[type="email"]',
     'input[name="email"]',
+    'input[name="username"]',
+    'input#1-email',
     '.auth0-lock-input[type="email"]'
   ];
 
   let emailInput = null;
   for (const selector of emailSelectors) {
     try {
-      await page.waitForSelector(selector, { timeout: 2000 });
-      emailInput = selector;
-      console.log(`✅ Found email input with selector: ${selector}`);
-      break;
+      const element = await page.$(selector);
+      if (element) {
+        emailInput = selector;
+        console.log(`✅ Found email input with selector: ${selector}`);
+        break;
+      }
     } catch (err) {
       console.log(`⚠️  Selector ${selector} not found, trying next...`);
     }
   }
 
   if (!emailInput) {
-    console.log("❌ Could not find email input field");
-    await page.screenshot({ path: "no-email-field.png", fullPage: true });
-    
-    // Debug: show what's on the page
-    const content = await page.content();
-    console.log("\n📄 Page contains 'input':", content.includes('<input'));
-    console.log("📄 Page contains 'email':", content.includes('email'));
-    
     throw new Error("Email input not found");
   }
 
   console.log("🖊️ Filling credentials...");
   
-  // Fill email
   await page.click(emailInput, { clickCount: 3 });
-  await page.type(emailInput, USERNAME, { delay: 50 });
+  await page.type(emailInput, USERNAME, { delay: 100 });
   console.log("✅ Email filled");
 
-  // Wait a bit before password
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await new Promise(resolve => setTimeout(resolve, 1000));
 
-  // Find password field
   const passwordSelectors = [
-    'input[name="password"]',
     'input[type="password"]',
+    'input[name="password"]',
     '.auth0-lock-input[type="password"]'
   ];
 
   let passwordInput = null;
   for (const selector of passwordSelectors) {
     try {
-      await page.waitForSelector(selector, { timeout: 2000 });
-      passwordInput = selector;
-      console.log(`✅ Found password input with selector: ${selector}`);
-      break;
+      const element = await page.$(selector);
+      if (element) {
+        passwordInput = selector;
+        console.log(`✅ Found password input with selector: ${selector}`);
+        break;
+      }
     } catch (err) {
       console.log(`⚠️  Selector ${selector} not found, trying next...`);
     }
@@ -138,28 +155,28 @@ async function loginWithForm(page) {
     throw new Error("Password input not found");
   }
 
-  // Fill password
   await page.click(passwordInput, { clickCount: 3 });
-  await page.type(passwordInput, PASSWORD, { delay: 50 });
+  await page.type(passwordInput, PASSWORD, { delay: 100 });
   console.log("✅ Password filled");
 
-  // Wait before submitting
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await new Promise(resolve => setTimeout(resolve, 1000));
 
-  // Find and click submit button
   const submitSelectors = [
-    'button[name="submit"]',
     'button[type="submit"]',
+    'button[name="submit"]',
+    'button[name="action"]',
     '.auth0-lock-submit'
   ];
 
   let submitButton = null;
   for (const selector of submitSelectors) {
     try {
-      await page.waitForSelector(selector, { timeout: 2000 });
-      submitButton = selector;
-      console.log(`✅ Found submit button with selector: ${selector}`);
-      break;
+      const element = await page.$(selector);
+      if (element) {
+        submitButton = selector;
+        console.log(`✅ Found submit button with selector: ${selector}`);
+        break;
+      }
     } catch (err) {
       console.log(`⚠️  Selector ${selector} not found, trying next...`);
     }
@@ -171,89 +188,297 @@ async function loginWithForm(page) {
 
   console.log("🔐 Submitting login form...");
   
-  // Click submit and wait for navigation
-  await Promise.all([
-    page.click(submitButton),
-    page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 }).catch(err => {
-      console.log("⚠️  Navigation timeout (might be ok):", err.message);
-    })
-  ]);
-
-  // Wait a bit more for page to settle
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  await page.click(submitButton);
+  console.log("✅ Submit button clicked");
+  
+  // Don't wait for navigation, just wait a fixed time
+  console.log("⏳ Waiting for login to process...");
+  await new Promise(resolve => setTimeout(resolve, 10000));
   
   const logged = await isLoggedIn(page);
   
   console.log("Current URL:", page.url());
   
   if (!logged) {
-    console.log("⚠️  Not on dashboard yet");
+    console.log("⚠️  Not on dashboard yet, taking screenshot");
     await page.screenshot({ path: "after-login-attempt.png", fullPage: true });
   } else {
-    console.log("✅ Logged in successfully!");
-    await saveCookies(page);
-  }
+  console.log("✅ Logged in successfully!");
+  await saveCookies(page);
+  return true; // <--- add this line
+}
   
   return logged;
 }
 
+// === IMPROVED: Function to search and extract load details ===
+async function searchLoad(page, reference) {
+  console.log(`\n🔎 Searching for load reference: ${reference}`);
+
+  try {
+    // Step 1: Open search
+    console.log("⌨️  Opening search with Ctrl+K...");
+    await page.keyboard.down('Control');
+    await page.keyboard.press('KeyK');
+    await page.keyboard.up('Control');
+    
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Step 2: Wait for search field
+    console.log("⏳ Waiting for search field...");
+    
+    let searchFieldFound = false;
+    try {
+      await page.waitForSelector('#search_field', { timeout: 5000 });
+      searchFieldFound = true;
+      console.log("✅ Search field appeared!");
+    } catch (err) {
+      console.log("⚠️  Ctrl+K didn't work, trying to click search button...");
+    }
+    
+    // If Ctrl+K didn't work, try clicking the button
+    if (!searchFieldFound) {
+      try {
+        await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button'));
+          const searchBtn = buttons.find(btn => 
+            btn.textContent.includes('Find') || 
+            btn.textContent.includes('anything')
+          );
+          if (searchBtn) {
+            searchBtn.click();
+            return true;
+          }
+          return false;
+        });
+        console.log("✅ Clicked search button");
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        await page.waitForSelector('#search_field', { timeout: 5000 });
+        searchFieldFound = true;
+      } catch (err) {
+        console.log("❌ Could not open search");
+        await page.screenshot({ path: "search-not-opened.png", fullPage: true });
+      }
+    }
+    
+    if (!searchFieldFound) {
+      throw new Error("Search field not found");
+    }
+    
+    console.log("✅ Search field is ready!");
+    
+    // Step 3: Type the reference
+    console.log(`⌨️  Typing load reference: ${reference}`);
+    await page.click('#search_field', { clickCount: 3 });
+    await page.type('#search_field', reference, { delay: 100 });
+    console.log(`✅ Typed: ${reference}`);
+    
+    // Take screenshot of search box with text
+    await page.screenshot({ path: "search-typed.png", fullPage: true });
+    console.log("📸 Screenshot: search-typed.png");
+    
+    // Step 4: Press Enter
+    console.log("⏎ Pressing Enter to search...");
+    await page.keyboard.press('Enter');
+    console.log("✅ Enter pressed");
+    
+    // Step 5: Wait for page to change/load
+    console.log("⏳ Waiting for search results to load...");
+    await new Promise(resolve => setTimeout(resolve, 8000));
+    
+    // Take screenshot of results
+    await page.screenshot({ path: "search-results.png", fullPage: true });
+    console.log("📸 Screenshot: search-results.png");
+    
+    // Step 6: Show what's actually on the page
+    console.log("\n📄 Analyzing page content...");
+    
+    const pageAnalysis = await page.evaluate(() => {
+      const bodyText = document.body.innerText;
+      const allText = bodyText.substring(0, 3000);
+      
+      const hasPickup = bodyText.toLowerCase().includes('pickup');
+      const hasDelivery = bodyText.toLowerCase().includes('delivery');
+      const hasWeight = bodyText.toLowerCase().includes('weight');
+      const hasRate = bodyText.toLowerCase().includes('rate');
+      const hasLoad = bodyText.toLowerCase().includes('load');
+      
+      const currentUrl = window.location.href;
+      
+      const loadElements = {
+        divs: document.querySelectorAll('div').length,
+        spans: document.querySelectorAll('span').length,
+        paragraphs: document.querySelectorAll('p').length,
+        hasTable: !!document.querySelector('table'),
+        hasForm: !!document.querySelector('form')
+      };
+      
+      return {
+        currentUrl,
+        allText,
+        keywords: { hasPickup, hasDelivery, hasWeight, hasRate, hasLoad },
+        elements: loadElements
+      };
+    });
+    
+    console.log("\n🌐 Current URL:", pageAnalysis.currentUrl);
+    console.log("\n🔑 Keywords found:");
+    console.log("  - Pickup:", pageAnalysis.keywords.hasPickup ? "✅" : "❌");
+    console.log("  - Delivery:", pageAnalysis.keywords.hasDelivery ? "✅" : "❌");
+    console.log("  - Weight:", pageAnalysis.keywords.hasWeight ? "✅" : "❌");
+    console.log("  - Rate:", pageAnalysis.keywords.hasRate ? "✅" : "❌");
+    console.log("  - Load:", pageAnalysis.keywords.hasLoad ? "✅" : "❌");
+    
+    console.log("\n📊 Page elements:");
+    console.log("  - Divs:", pageAnalysis.elements.divs);
+    console.log("  - Spans:", pageAnalysis.elements.spans);
+    console.log("  - Has table:", pageAnalysis.elements.hasTable);
+    
+    console.log("\n📄 FULL PAGE TEXT (first 3000 chars):");
+    console.log("=====================================");
+    console.log(pageAnalysis.allText);
+    console.log("=====================================");
+
+    // Step 7: Try to extract with better patterns
+    const loadInfo = await page.evaluate(() => {
+      const text = document.body.innerText;
+      
+      const pickupMatch = text.match(/(?:Pickup|Origin|From)[:\s]*([^\n]{10,80})/i);
+      const deliveryMatch = text.match(/(?:Delivery|Destination|To)[:\s]*([^\n]{10,80})/i);
+      const weightMatch = text.match(/(?:Weight|Pounds|lbs)[:\s]*([^\n]{5,30})/i);
+      const rateMatch = text.match(/(?:Rate|Price|Cost)[:\s]*\$?([^\n]{3,20})/i);
+      
+      return { 
+        pickup: pickupMatch?.[1]?.trim() || "N/A",
+        delivery: deliveryMatch?.[1]?.trim() || "N/A",
+        weight: weightMatch?.[1]?.trim() || "N/A",
+        rate: rateMatch?.[1]?.trim() || "N/A"
+      };
+    });
+
+    console.log("\n📦 EXTRACTED LOAD INFO:");
+    console.log("  Pickup:", loadInfo.pickup);
+    console.log("  Delivery:", loadInfo.delivery);
+    console.log("  Weight:", loadInfo.weight);
+    console.log("  Rate:", loadInfo.rate);
+
+    const formatted = `
+📦 LOAD DETAILS (Load ${reference}):
+- Pickup: ${loadInfo.pickup}
+- Delivery: ${loadInfo.delivery}
+- Weight: ${loadInfo.weight}
+- Rate: ${loadInfo.rate}
+
+🚛 CAPACITY INQUIRY:
+When and where will you be empty for pickup?
+    `.trim();
+
+    console.log("\n🧾 Formatted Output:\n");
+    console.log(formatted);
+    
+    return { loadInfo, formatted, pageText: pageAnalysis.allText };
+    
+  } catch (err) {
+    console.error(`❌ Error during load search:`, err.message);
+    await page.screenshot({ path: "search-error.png", fullPage: true });
+    console.log("📸 Error screenshot: search-error.png");
+    return null;
+  }
+}
+
+// === MAIN EXECUTION ===
 (async () => {
   console.log("🚀 Launching browser...");
   const browser = await puppeteer.launch({ 
     headless: false,
     defaultViewport: null,
-    args: ['--start-maximized']
+    args: ['--start-maximized', '--no-sandbox', '--disable-setuid-sandbox']
   });
   const page = await browser.newPage();
 
-  console.log("🌐 Navigating to QuoteFactory...");
+  console.log("🌐 Starting QuoteFactory automation...");
   
-  // Try loading cookies
+  // Try with cookies first
   const cookies = await loadCookies();
   if (cookies && cookies.length > 0) {
-    console.log("🍪 Found cookies, applying...");
+    console.log("🍪 Found saved cookies, applying...");
     try {
       await page.setCookie(...cookies);
+      console.log("✅ Cookies applied");
     } catch (err) {
-      console.warn("⚠️ Failed to set cookies:", err.message);
+      console.warn("⚠️  Failed to set cookies:", err.message);
+    }
+    
+    // Try to go to dashboard with cookies
+    try {
+      await page.goto(DASHBOARD_URL, { 
+        waitUntil: "domcontentloaded",
+        timeout: 60000 
+      });
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      if (await isLoggedIn(page)) {
+        console.log("✅ Logged in via cookies!");
+        
+        // Search for load
+        let loadReference = process.argv[2] || "289926";
+        const result = await searchLoad(page, loadReference);
+        
+        if (result) {
+          console.log("\n✅ ✅ ✅ Load search completed!");
+        }
+        
+        await page.screenshot({ path: "final-state.png", fullPage: true });
+        console.log("\n✨ Done! Browser will stay open for 30 seconds.");
+        await new Promise(resolve => setTimeout(resolve, 30000));
+        await browser.close();
+        return;
+      }
+    } catch (err) {
+      console.log("⚠️  Cookies didn't work, will try login form");
     }
   }
 
-  console.log("⏳ Checking login status...");
+  // If cookies didn't work, do fresh login
+  console.log("\n🔐 Performing fresh login...");
+  const loggedIn = await loginWithForm(page);
   
-  // Go to dashboard to check if cookies worked
-  await page.goto(DASHBOARD_URL, { waitUntil: "networkidle2", timeout: 30000 });
-  
-  // Wait a bit for redirects to happen
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
-  if (await isLoggedIn(page)) {
-    console.log("✅ Logged in via saved cookies");
-    await page.screenshot({ path: "dashboard.png", fullPage: true });
-    console.log("📸 Screenshot saved: dashboard.png");
-  } else {
-    console.log("🔁 Cookies invalid or absent — performing form login");
-    await loginWithForm(page);
+  if (loggedIn) {
+    console.log("\n✅ Successfully logged in!");
     
-    // Navigate to dashboard after login
-    if (await isLoggedIn(page)) {
-      console.log("✅ Now on dashboard!");
+    // Navigate to dashboard
+    try {
+      await page.goto(DASHBOARD_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    } catch (err) {
+      console.log("⚠️  Dashboard navigation issue");
+    }
+    
+    // Search for load
+    let loadReference = process.argv[2] || "289926";
+    console.log(`\n🎯 Searching for load: ${loadReference}`);
+    
+    const result = await searchLoad(page, loadReference);
+    
+    if (result) {
+      console.log("\n✅ ✅ ✅ Load search completed!");
     } else {
-      console.log("⚠️  Still not on dashboard, but login may have worked");
-      console.log("Attempting to navigate to dashboard...");
-      await page.goto(DASHBOARD_URL, { waitUntil: "networkidle2" });
+      console.log("\n⚠️  Could not complete load search");
     }
-    
-    await page.screenshot({ path: "final-state.png", fullPage: true });
-    console.log("📸 Screenshot saved: final-state.png");
+  } else {
+    console.log("\n❌ Login failed");
+    console.log("Check login-state.png and after-login.png screenshots");
   }
 
+  await page.screenshot({ path: "final-state.png", fullPage: true });
+  console.log("\n📸 Final screenshot: final-state.png");
   console.log("\n✨ Done! Browser will stay open for 30 seconds.");
   await new Promise(resolve => setTimeout(resolve, 30000));
   
   await browser.close();
   console.log("👋 Browser closed");
 })().catch(error => {
-  console.error("❌ Puppeteer test failed:", error);
+  console.error("\n❌ Script failed:", error.message);
+  console.error(error.stack);
   process.exit(1);
 });
