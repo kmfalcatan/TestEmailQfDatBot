@@ -1,504 +1,257 @@
-// testPuppeteer.js - Fixed version with better auth detection
+// testPuppeteer.js - Minimized version
 import "dotenv/config";
 import fs from "fs/promises";
 import puppeteer from "puppeteer";
 
-const COOKIES_PATH = "./cookies.json";
-const DASHBOARD_URL = "https://app.quotefactory.com/broker/dashboard";
+const CONFIG = {
+  COOKIES_PATH: "./cookies.json",
+  DASHBOARD_URL: "https://app.quotefactory.com/broker/dashboard",
+  USERNAME: process.env.QF_USERNAME,
+  PASSWORD: process.env.QF_PASSWORD,
+  FOLLOW_UP_DELAY: 5000,
+};
 
-const USERNAME = process.env.QF_USERNAME;
-const PASSWORD = process.env.QF_PASSWORD;
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function findVisible(page, selectors) {
+  for (const sel of selectors) {
+    try {
+      const el = await page.$(sel);
+      if (el && await page.evaluate(e => getComputedStyle(e).display !== 'none', el)) return sel;
+    } catch {}
+  }
+  return null;
+}
 
 async function loadCookies() {
-  try {
-    const raw = await fs.readFile(COOKIES_PATH, "utf8");
-    return JSON.parse(raw);
-  } catch (err) {
-    return null;
-  }
+  try { return JSON.parse(await fs.readFile(CONFIG.COOKIES_PATH, "utf8")); } catch { return null; }
 }
 
 async function saveCookies(page) {
-  const cookies = await page.cookies();
-  await fs.writeFile(COOKIES_PATH, JSON.stringify(cookies, null, 2));
-  console.log("✅ Cookies saved to", COOKIES_PATH);
+  await fs.writeFile(CONFIG.COOKIES_PATH, JSON.stringify(await page.cookies(), null, 2));
 }
 
 async function isLoggedIn(page) {
-  const url = page.url();
-  console.log("🔍 Checking URL:", url);
-  
-  if (url.includes('auth.quotefactory.com')) {
-    console.log("❌ Still on auth page - NOT logged in");
-    return false;
+  if (page.url().includes('auth.quotefactory.com')) return false;
+  if (page.url().includes('app.quotefactory.com')) {
+    await wait(2000);
+    return page.evaluate(() => !!(document.querySelector('nav, header, button') || document.body.textContent.includes('find')));
   }
-  
-  if (url.includes('/broker/dashboard') || url.includes('app.quotefactory.com')) {
-    try {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      const hasDashboard = await page.evaluate(() => {
-        const text = document.body.textContent || '';
-        const hasNav = document.querySelector('nav, header, [role="navigation"]');
-        const hasButton = document.querySelector('button');
-        const hasSearchText = text.toLowerCase().includes('find');
-        return !!(hasNav || hasButton || hasSearchText);
-      });
-      
-      if (hasDashboard) {
-        console.log("✅ Dashboard elements found - LOGGED IN");
-        return true;
-      }
-    } catch (err) {
-      console.log("⚠️  Could not verify dashboard - " + err.message);
-    }
-  }
-  
   return false;
 }
 
-async function loginWithForm(page) {
-  console.log("🌐 Navigating to login page...");
-  
-  try {
-    await page.goto('https://app.quotefactory.com', { 
-      waitUntil: "networkidle2",
-      timeout: 90000
-    });
-    console.log("✅ Page loaded");
-  } catch (err) {
-    console.log("⚠️  Navigation issue:", err.message);
-  }
+async function login(page) {
+  try { await page.goto('https://app.quotefactory.com', { waitUntil: "networkidle2", timeout: 90000 }); } catch {}
+  await wait(8000);
+  if (await isLoggedIn(page)) return true;
 
-  // Wait longer for page to settle
-  console.log("⏳ Waiting for page to fully load...");
-  await new Promise(resolve => setTimeout(resolve, 8000));
-
-  // Check if we're already logged in
-  if (await isLoggedIn(page)) {
-    console.log("✅ Already logged in!");
-    return true;
-  }
-
-  console.log("🔍 Looking for login form elements...");
-  
-  // Try multiple approaches to find the login form
-  let loginFormFound = false;
-  let emailInput = null;
-  let passwordInput = null;
-  
-  // Approach 1: Look for Auth0 Lock widget
   try {
     await page.waitForSelector('.auth0-lock-widget', { timeout: 10000 });
-    console.log("✅ Auth0 Lock widget found");
-    loginFormFound = true;
-  } catch (err) {
-    console.log("⚠️  Auth0 Lock widget not found, trying alternative selectors...");
-  }
-  
-  // Approach 2: Look for any login form elements
-  if (!loginFormFound) {
-    try {
-      await page.waitForFunction(() => {
-        const emailInputs = document.querySelectorAll('input[type="email"], input[type="text"], input[name="email"], input[name="username"]');
-        const passwordInputs = document.querySelectorAll('input[type="password"]');
-        return emailInputs.length > 0 && passwordInputs.length > 0;
-      }, { timeout: 15000 });
-      console.log("✅ Login form elements found");
-      loginFormFound = true;
-    } catch (err) {
-      console.log("⚠️  Login form elements not found");
-    }
-  }
-  
-  // Approach 3: Check if we're on auth0 page and wait for it to load
-  if (!loginFormFound && page.url().includes('auth.quotefactory.com')) {
-    console.log("🔄 On Auth0 page, waiting for form to render...");
-    await new Promise(resolve => setTimeout(resolve, 10000));
-    
-    // Check again for form elements
-    const hasForm = await page.evaluate(() => {
-      const emailInputs = document.querySelectorAll('input[type="email"], input[type="text"]');
-      const passwordInputs = document.querySelectorAll('input[type="password"]');
-      return emailInputs.length > 0 && passwordInputs.length > 0;
-    });
-    
-    if (hasForm) {
-      console.log("✅ Form loaded after waiting");
-      loginFormFound = true;
-    }
-  }
-  
-  if (!loginFormFound) {
-    throw new Error("Login form not found after multiple attempts");
+    await wait(5000);
+  } catch {
+    await page.waitForFunction(() => document.querySelectorAll('input[type="email"], input[type="password"]').length >= 2, { timeout: 60000 });
   }
 
-  // Find email input with multiple selectors
-  console.log("🔍 Looking for email input field...");
-  const emailSelectors = [
-    'input[type="email"]',
-    'input[name="email"]',
-    'input[name="username"]',
-    'input[id*="email"]',
-    'input[placeholder*="email" i]',
-    'input[placeholder*="username" i]',
-    '.auth0-lock-input[type="email"]',
-    'input[type="text"]'
-  ];
+  const emailSel = await findVisible(page, ['input[type="email"]', 'input[name="email"]', 'input[name="username"]']);
+  if (!emailSel) throw new Error("Email input not found");
+  await page.click(emailSel, { clickCount: 3 });
+  await wait(500);
+  await page.type(emailSel, CONFIG.USERNAME, { delay: 100 });
+  await wait(1500);
 
-  for (const selector of emailSelectors) {
-    try {
-      const element = await page.$(selector);
-      if (element) {
-        const isVisible = await page.evaluate(el => {
-          const style = window.getComputedStyle(el);
-          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-        }, element);
-        
-        if (isVisible) {
-          emailInput = selector;
-          console.log(`✅ Found visible email input with selector: ${selector}`);
-          break;
-        }
-      }
-    } catch (err) {
-      // Continue trying other selectors
-    }
-  }
+  const passSel = await findVisible(page, ['input[type="password"]', 'input[name="password"]']);
+  if (!passSel) throw new Error("Password input not found");
+  await page.click(passSel, { clickCount: 3 });
+  await wait(500);
+  await page.type(passSel, CONFIG.PASSWORD, { delay: 100 });
+  await wait(1500);
 
-  if (!emailInput) {
-    throw new Error("Email input not found");
-  }
-
-  console.log("🖊️ Filling email...");
-  await page.waitForSelector(emailInput, { visible: true, timeout: 5000 });
-  await page.click(emailInput, { clickCount: 3 });
-  await new Promise(resolve => setTimeout(resolve, 500));
-  await page.type(emailInput, USERNAME, { delay: 100 });
-  console.log("✅ Email filled");
-
-  await new Promise(resolve => setTimeout(resolve, 1500));
-
-  // Find password input
-  console.log("🔍 Looking for password input field...");
-  const passwordSelectors = [
-    'input[type="password"]',
-    'input[name="password"]',
-    'input[id*="password"]',
-    'input[placeholder*="password" i]',
-    '.auth0-lock-input[type="password"]'
-  ];
-
-  for (const selector of passwordSelectors) {
-    try {
-      const element = await page.$(selector);
-      if (element) {
-        const isVisible = await page.evaluate(el => {
-          const style = window.getComputedStyle(el);
-          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-        }, element);
-        
-        if (isVisible) {
-          passwordInput = selector;
-          console.log(`✅ Found visible password input with selector: ${selector}`);
-          break;
-        }
-      }
-    } catch (err) {
-      // Continue trying other selectors
-    }
-  }
-
-  if (!passwordInput) {
-    throw new Error("Password input not found");
-  }
-
-  console.log("🖊️ Filling password...");
-  await page.waitForSelector(passwordInput, { visible: true, timeout: 5000 });
-  await page.click(passwordInput, { clickCount: 3 });
-  await new Promise(resolve => setTimeout(resolve, 500));
-  await page.type(passwordInput, PASSWORD, { delay: 100 });
-  console.log("✅ Password filled");
-
-  await new Promise(resolve => setTimeout(resolve, 1500));
-
-  // Find submit button
-  console.log("🔍 Looking for submit button...");
-  const submitSelectors = [
-    'button[type="submit"]',
-    'button[name="submit"]',
-    'button[name="action"]',
-    'input[type="submit"]',
-    '.auth0-lock-submit',
-    'button:has-text("Log in")',
-    'button:has-text("Sign in")',
-    'button:has-text("Continue")'
-  ];
-
-  let submitButton = null;
-  for (const selector of submitSelectors) {
-    try {
-      const element = await page.$(selector);
-      if (element) {
-        const isVisible = await page.evaluate(el => {
-          const style = window.getComputedStyle(el);
-          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-        }, element);
-        
-        if (isVisible) {
-          submitButton = selector;
-          console.log(`✅ Found visible submit button with selector: ${selector}`);
-          break;
-        }
-      }
-    } catch (err) {
-      // Continue trying other selectors
-    }
-  }
-  
-  // Fallback: find button by text content
-  if (!submitButton) {
-    console.log("🔍 Trying to find submit button by text content...");
-    submitButton = await page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll('button'));
-      const submitBtn = buttons.find(btn => {
-        const text = btn.textContent.toLowerCase();
-        return text.includes('log in') || text.includes('sign in') || text.includes('continue') || text.includes('submit');
-      });
-      
-      if (submitBtn) {
-        submitBtn.setAttribute('data-puppeteer-submit', 'true');
-        return '[data-puppeteer-submit="true"]';
-      }
+  let submitSel = await findVisible(page, ['button[type="submit"]', 'button[name="submit"]', '.auth0-lock-submit']);
+  if (!submitSel) {
+    submitSel = await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(b => /log in|sign in|continue/i.test(b.textContent));
+      if (btn) { btn.setAttribute('data-submit', '1'); return '[data-submit="1"]'; }
       return null;
     });
-    
-    if (submitButton) {
-      console.log("✅ Found submit button by text content");
-    }
   }
+  if (!submitSel) throw new Error("Submit button not found");
 
-  if (!submitButton) {
-    throw new Error("Submit button not found");
-  }
-
-  console.log("🔐 Submitting login form...");
-  await page.click(submitButton);
-  console.log("✅ Submit button clicked");
+  await page.click(submitSel);
+  try { await page.waitForNavigation({ timeout: 15000, waitUntil: 'networkidle2' }); } catch {}
+  await wait(5000);
   
-  console.log("⏳ Waiting for login to process...");
-  
-  // Wait for navigation or dashboard to appear
-  try {
-    await page.waitForNavigation({ timeout: 15000, waitUntil: 'networkidle2' });
-    console.log("✅ Navigation completed");
-  } catch (err) {
-    console.log("⚠️  Navigation wait timeout, checking login status anyway...");
-  }
-  
-  await new Promise(resolve => setTimeout(resolve, 5000));
-  
-  const logged = await isLoggedIn(page);
-  
-  console.log("Current URL:", page.url());
-  
-  if (!logged) {
-    console.log("⚠️  Not on dashboard yet, waiting a bit longer...");
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    const logged2 = await isLoggedIn(page);
-    
-    if (logged2) {
-      console.log("✅ Logged in successfully!");
-      await saveCookies(page);
-      return true;
-    } else {
-      console.log("❌ Login appears to have failed");
-      return false;
-    }
-  } else {
-    console.log("✅ Logged in successfully!");
-    await saveCookies(page);
-    return true;
-  }
+  const loggedIn = await isLoggedIn(page);
+  if (loggedIn) await saveCookies(page);
+  return loggedIn;
 }
 
-// === IMPROVED: Function to search and extract load details ===
-async function searchLoad(page, reference) {
-  console.log(`\n🔎 Searching for load reference: ${reference}`);
+async function searchLoad(page, ref) {
+  await page.keyboard.down('Control');
+  await page.keyboard.press('KeyK');
+  await page.keyboard.up('Control');
+  await wait(2000);
 
   try {
-    console.log("⌨️  Opening search with Ctrl+K...");
-    await page.keyboard.down('Control');
-    await page.keyboard.press('KeyK');
-    await page.keyboard.up('Control');
+    await page.waitForSelector('#search_field', { timeout: 5000 });
+  } catch {
+    await page.evaluate(() => Array.from(document.querySelectorAll('button')).find(b => /find|anything/i.test(b.textContent))?.click());
+    await wait(2000);
+    await page.waitForSelector('#search_field', { timeout: 5000 });
+  }
+
+  await page.click('#search_field', { clickCount: 3 });
+  await page.type('#search_field', ref, { delay: 100 });
+  await page.keyboard.press('Enter');
+  await wait(8000);
+
+  await page.evaluate(() => {
+    ['.\\@container a[data-current="true"]', '.\\@container a', '.\\@container'].some(sel => {
+      const el = document.querySelector(sel);
+      if (el) { el.click(); return true; }
+    });
+  });
+  await wait(5000);
+
+  return await page.evaluate(() => {
+    const text = document.body.innerText;
+    const bolMatch = text.match(/BOL[\s\n]+(\d+)/i);
+    const loadReference = bolMatch ? bolMatch[1] : "N/A";
     
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    console.log("⏳ Waiting for search field...");
-    
-    let searchFieldFound = false;
-    try {
-      await page.waitForSelector('#search_field', { timeout: 5000 });
-      searchFieldFound = true;
-      console.log("✅ Search field appeared!");
-    } catch (err) {
-      console.log("⚠️  Ctrl+K didn't work, trying to click search button...");
+    let rate = "N/A";
+    const priceDiv = document.querySelector('.text-right.py-2.font-bold.order-last.px-3');
+    if (priceDiv) {
+      const m = priceDiv.textContent.match(/\$[\d,]+\.?\d*/);
+      if (m) rate = m[0];
     }
     
-    if (!searchFieldFound) {
-      try {
-        await page.evaluate(() => {
-          const buttons = Array.from(document.querySelectorAll('button'));
-          const searchBtn = buttons.find(btn => 
-            btn.textContent.includes('Find') || 
-            btn.textContent.includes('anything')
-          );
-          if (searchBtn) {
-            searchBtn.click();
-            return true;
-          }
-          return false;
-        });
-        console.log("✅ Clicked search button");
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        await page.waitForSelector('#search_field', { timeout: 5000 });
-        searchFieldFound = true;
-      } catch (err) {
-        console.log("❌ Could not open search");
+    let weight = "N/A";
+    const weightDiv = Array.from(document.querySelectorAll("div")).find(d => d.textContent.trim() === "Weight");
+    if (weightDiv) {
+      const val = weightDiv.closest(".flex")?.querySelector("div.font-semibold, .text-12, .text-15");
+      if (val) {
+        const txt = val.textContent.replace(/\u202F/g, "").trim();
+        weight = txt.match(/lb/i) ? txt : `${txt} lb`;
       }
     }
     
-    if (!searchFieldFound) {
-      throw new Error("Search field not found");
+    let commodity = "N/A";
+    const commDiv = Array.from(document.querySelectorAll("div.text-black-100.text-12.pt-1.flex.items-baseline")).find(d => d.querySelector("div.font-semibold"));
+    if (commDiv) {
+      const strong = commDiv.querySelector("div.font-semibold")?.textContent.trim() || "";
+      const extra = Array.from(commDiv.querySelectorAll("div")).map(d => d.textContent.trim()).filter(t => t && t !== strong).join(" ");
+      commodity = [strong, extra].filter(Boolean).join(" ").trim();
     }
     
-    console.log("✅ Search field is ready!");
-    
-    console.log(`⌨️  Typing load reference: ${reference}`);
-    await page.click('#search_field', { clickCount: 3 });
-    await page.type('#search_field', reference, { delay: 100 });
-    console.log(`✅ Typed: ${reference}`);
-    
-    console.log("⏎ Pressing Enter to search...");
-    await page.keyboard.press('Enter');
-    console.log("✅ Enter pressed");
-    
-    console.log("⏳ Waiting for search results to load...");
-    await new Promise(resolve => setTimeout(resolve, 8000));
+    function parseDateTime(attr, txt) {
+      try {
+        const d = new Date(attr);
+        const mo = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        const m = txt.match(/(\d+):(\d+)\s*(am|pm)?/i);
+        let hr = 0, min = 0;
+        if (m) {
+          hr = parseInt(m[1]);
+          min = parseInt(m[2]);
+          const isPM = m[3]?.toLowerCase() === 'pm';
+          if (isPM && hr !== 12) hr += 12;
+          else if (!isPM && hr === 12) hr = 0;
+        }
+        return { date: `${mo}/${day}`, time: `${String(hr).padStart(2, '0')}:${String(min).padStart(2, '0')}` };
+      } catch {
+        return { date: 'N/A', time: 'N/A' };
+      }
+    }
 
-    console.log("\n📄 Extracting load information...");
-    
-    // Extract all the load information from the page
-    const loadInfo = await page.evaluate(() => {
-      const text = document.body.innerText;
-      
-      // Extract load reference
-      const refMatch = text.match(/Shipments[\s\n]+(\d+)/i) || text.match(/(\d{6})/);
-      const loadReference = refMatch ? refMatch[1] : "N/A";
-      
-      // Extract status
-      const statusMatch = text.match(/(Booked|Requested|Scheduled|In transit)/i);
-      const status = statusMatch ? statusMatch[1] : "N/A";
-      
-      // Extract ALL dates (pickup and delivery)
-      const dateMatches = text.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun)/gi);
-      const pickupDate = dateMatches && dateMatches[0] ? dateMatches[0] : "N/A";
-      const deliveryDate = dateMatches && dateMatches[1] ? dateMatches[1] : "N/A";
-      
-      // Extract customer
-      const customerMatch = text.match(/\$[\d,]+\.?\d*\s*\n\s*([^\n]+)\s*\n\s*[A-Z]{2}/);
-      const customer = customerMatch ? customerMatch[1].trim() : "N/A";
-      
-      // Extract rate
-      const rateMatch = text.match(/\$[\d,]+\.?\d*/);
-      const rate = rateMatch ? rateMatch[0] : "N/A";
-      
-      // Detect PICK UP sections and extract their locations
-const pickupSections = Array.from(document.querySelectorAll('div.text-12.text-gray-800.font-semibold.tracking-wide.pr-4'))
-  .filter(div => div.textContent.trim().toUpperCase().includes('PICK UP'));
+    const locs = Array.from(document.querySelectorAll('[id^="shipment-location-"]'));
+    const pickups = [], deliveries = [];
+    let foundPickup = false;
 
-const pickupLocations = pickupSections.map(section => {
-  const parent = section.closest('div');
-  if (!parent) return null;
-  const text = parent.innerText;
-  const match = text.match(/([A-Za-z\s]+),\s*([A-Z]{2})/);
-  return match ? `${match[1].trim()}, ${match[2]}` : null;
-}).filter(Boolean);
+    locs.forEach(loc => {
+      const addr = loc.querySelector('address');
+      if (!addr) return;
 
-let pickup = "N/A";
-let delivery = "N/A";
+      const lines = Array.from(addr.querySelectorAll('div')).map(d => d.textContent.trim()).filter(Boolean);
+      let cityState = lines.length > 1 ? lines[lines.length - 1].replace(/\s*\d{5}(?:-\d{4})?/, "").trim() : "";
 
-if (pickupLocations.length > 1) {
-  // If there are multiple pickup locations
-  pickup = pickupLocations.join(' | '); // join them
-  delivery = pickup; // set the same string as delivery
-} else {
-  // Fallback to your previous regex-based logic
-  const locationMatches = Array.from(text.matchAll(/([^\n]{3,40})\s*\n\s*([A-Z]{2})\b/g));
-  if (locationMatches.length >= 2) {
-    const pickupCity = locationMatches[0][1].trim();
-    const pickupState = locationMatches[0][2];
-    pickup = `${pickupCity}, ${pickupState}`;
-    
-    const deliveryCity = locationMatches[1][1].trim();
-    const deliveryState = locationMatches[1][2];
-    delivery = `${deliveryCity}, ${deliveryState}`;
-  } else if (locationMatches.length === 1) {
-    const pickupCity = locationMatches[0][1].trim();
-    const pickupState = locationMatches[0][2];
-    pickup = `${pickupCity}, ${pickupState}`;
-  }
-}
-      
-      // Extract weight
-      const weightMatch = text.match(/([\d,]+)\s*lb/i);
-      const weight = weightMatch ? `${weightMatch[1]} lbs` : "N/A";
-      
-      // Extract equipment type
-      const equipmentMatch = text.match(/(Other|Dry Van|Reefer|Flatbed)/i);
-      const equipment = equipmentMatch ? equipmentMatch[1] : "N/A";
-      
-      // Extract carrier
-      const carrierMatch = text.match(/No carrier|([A-Z][^\n]+LLC|[A-Z][^\n]+Inc)/);
-      const carrier = carrierMatch ? (carrierMatch[0] === "No carrier" ? "No carrier assigned" : carrierMatch[1]) : "N/A";
-      
-      return { 
-        loadReference,
-        status,
-        pickupDate,
-        deliveryDate,
-        customer,
-        rate,
-        pickup,
-        delivery,
-        weight,
-        equipment,
-        carrier
-      };
+      const times = loc.querySelectorAll('.text-right time[datetime]');
+      let dateTime = "N/A";
+      if (times.length >= 2) {
+        const s = parseDateTime(times[0].getAttribute('datetime'), times[0].textContent.trim());
+        const e = parseDateTime(times[1].getAttribute('datetime'), times[1].textContent.trim());
+        dateTime = `${s.date} ${s.time} - ${e.time}`;
+      } else if (times.length === 1) {
+        const p = parseDateTime(times[0].getAttribute('datetime'), times[0].textContent.trim());
+        dateTime = `${p.date} ${p.time}`;
+      }
+
+      const txt = loc.textContent.toLowerCase();
+      const isPickup = txt.includes('pick up') || (txt.includes('picked up') && !txt.includes('deliver'));
+      const isDelivery = txt.includes('deliver');
+
+      let finalPickup = isPickup, finalDelivery = isDelivery;
+      if (!finalPickup && !finalDelivery) {
+        if (!foundPickup) finalPickup = true;
+        else finalDelivery = true;
+      }
+
+      if (finalPickup) {
+        foundPickup = true;
+        pickups.push(`${cityState}, ${dateTime}`);
+      } else if (finalDelivery) {
+        deliveries.push(`${cityState}, ${dateTime}`);
+      }
     });
 
-    console.log("\n📦 EXTRACTED LOAD INFO:");
-    console.log("  Load Reference:", loadInfo.loadReference);
-    console.log("  Status:", loadInfo.status);
-    console.log("  Pickup Date:", loadInfo.pickupDate);
-    console.log("  Pickup Location:", loadInfo.pickup);
-    console.log("  Delivery Date:", loadInfo.deliveryDate);
-    console.log("  Delivery Location:", loadInfo.delivery);
-    console.log("  Customer:", loadInfo.customer);
-    console.log("  Rate:", loadInfo.rate);
-    console.log("  Weight:", loadInfo.weight);
-    console.log("  Equipment:", loadInfo.equipment);
-    console.log("  Carrier:", loadInfo.carrier);
+    const pickup = pickups.length ? pickups.map((p, i) => `Pickup ${i + 1}: ${p}`).join("\n") : "N/A";
+    const delivery = deliveries.length ? deliveries.map((d, i) => `Delivery ${i + 1}: ${d}`).join("\n") : "N/A";
 
-    const formatted = `Hello,
+    return { loadReference, rate, weight, commodity, pickup, delivery };
+  });
+}
 
-Thank you for your inquiry about load ${loadInfo.loadReference}. Here are the details:
+function getFormat2(ref) {
+  return {
+    subject: `Re: Load Inquiry - ${ref}`,
+    body: `Hello,
+
+Thank you for your inquiry regarding load ${ref}.
+
+I've identified this load reference and am currently pulling the complete details from our system. You'll receive:
+
+📦 LOAD INFORMATION:
+• Pickup and delivery locations with dates/times  
+• Commodity details and weight requirements
+• Our competitive rate quote
+• Equipment specifications
+• Any special handling requirements
+
+This detailed information will be sent within the next few moments.
+
+🚛 TO EXPEDITE: When and where will you be empty for pickup?
+
+We're ready to provide immediate quotes and book qualified loads on the spot.
+
+Best regards,
+Balto Booking
+
+---
+Professional freight services with real-time load tracking`
+  };
+}
+
+function getFormat1(data) {
+  return {
+    subject: `Re: Load Inquiry - ${data.loadReference} - Complete Details`,
+    body: `Hello,
+
+Thank you for your inquiry about load ${data.loadReference}. Here are the details:
 
 📦 LOAD DETAILS:
-- Pickup: ${loadInfo.pickup}, ${loadInfo.pickupDate}
-- Delivery: ${loadInfo.delivery}, ${loadInfo.deliveryDate}
-- Weight: ${loadInfo.weight}
-- Rate: ${loadInfo.rate}
+${data.pickup}
+${data.delivery}
+Weight: ${data.weight}
+Commodity: ${data.commodity}
+Rate: ${data.rate}
 
 🚛 CAPACITY INQUIRY:
 When and where will you be empty for pickup?
@@ -507,100 +260,95 @@ Best regards,
 Balto Booking
 
 ---
-Automated response with live QuoteFactory data
-    `.trim();
-
-    console.log("\n🧾 FORMATTED OUTPUT:");
-    console.log(formatted);
-    
-    return { loadInfo, formatted };
-    
-  } catch (err) {
-    console.error(`❌ Error during load search:`, err.message);
-    return null;
-  }
+Automated response with live QuoteFactory data`
+  };
 }
 
-// === MAIN EXECUTION ===
+function getFormat3(ref) {
+  return {
+    subject: `Re: Load Inquiry - DAT Reference Number Needed`,
+    body: `Hello,
+
+Thank you for reaching out about this load opportunity.
+
+To provide you with accurate pricing and availability, could you please provide the DAT load reference number or QuoteFactory load ID?
+
+This will help us:
+- Pull the exact load details from our system  
+- Provide you with competitive pricing
+- Respond faster with availability
+
+Once you provide the reference number, we'll get back to you immediately with our quote and capacity.
+
+Thank you!
+
+Best regards,
+Balto Booking
+
+---
+Automated response - Please reply with DAT reference number`
+  };
+}
+
 (async () => {
-  console.log("🚀 Launching browser...");
-  const browser = await puppeteer.launch({ 
+  const ref = process.argv[2] || "302687";
+  console.log(`🚀 Processing load: ${ref}\n`);
+
+  const browser = await puppeteer.launch({
     headless: false,
     defaultViewport: null,
-    args: ['--start-maximized', '--no-sandbox', '--disable-setuid-sandbox']
+    args: ['--start-maximized', '--no-sandbox']
   });
-  const page = await browser.newPage();
 
-  console.log("🌐 Navigating to QuoteFactory...");
-  
-  const cookies = await loadCookies();
-  if (cookies && cookies.length > 0) {
-    console.log("🍪 Found cookies, applying...");
-    try {
-      await page.setCookie(...cookies);
-    } catch (err) {
-      console.warn("⚠️ Failed to set cookies:", err.message);
-    }
-  }
-
-  console.log("⏳ Checking login status...");
-  
   try {
-    await page.goto(DASHBOARD_URL, { 
-      waitUntil: "networkidle2",
-      timeout: 90000 
-    });
-  } catch (err) {
-    console.log("⚠️  Navigation timeout (continuing anyway)");
-  }
-  
-  await new Promise(resolve => setTimeout(resolve, 5000));
+    const page = await browser.newPage();
+    const cookies = await loadCookies();
+    if (cookies) await page.setCookie(...cookies).catch(() => {});
 
-  let loggedIn = await isLoggedIn(page);
-  
-  if (!loggedIn) {
-    console.log("🔁 Cookies invalid or absent — performing form login");
-    loggedIn = await loginWithForm(page);
-    
-    if (loggedIn) {
-      console.log("✅ Login successful, navigating to dashboard...");
-      try {
-        await page.goto(DASHBOARD_URL, { waitUntil: "networkidle2", timeout: 60000 });
-        await new Promise(resolve => setTimeout(resolve, 3000));
-      } catch (err) {
-        console.log("⚠️  Dashboard navigation timeout");
+    try { await page.goto(CONFIG.DASHBOARD_URL, { waitUntil: "networkidle2", timeout: 90000 }); } catch {}
+    await wait(5000);
+
+    let loggedIn = await isLoggedIn(page);
+    if (!loggedIn) {
+      console.log("🔐 Logging in...");
+      loggedIn = await login(page);
+      if (loggedIn) {
+        await page.goto(CONFIG.DASHBOARD_URL, { waitUntil: "networkidle2", timeout: 60000 }).catch(() => {});
+        await wait(3000);
       }
     }
-  } else {
-    console.log("✅ Logged in via saved cookies");
-  }
+    if (!loggedIn) throw new Error("Login failed");
 
-  if (loggedIn) {
-    let loadReference = process.argv[2];
-    if (!loadReference) {
-      console.log("⚠️  No load reference provided");
-      console.log("Usage: node testPuppeteer.js 282032");
-      loadReference = "282032";
-      console.log(`Using default: ${loadReference}`);
-    }
-
-    const result = await searchLoad(page, loadReference);
+    // Send Format 2 immediately
+    console.log("📤 [1] Sending acknowledgment...");
+    const format2 = getFormat2(ref);
+    console.log(`\nSubject: ${format2.subject}\n\n${format2.body}\n`);
     
-    if (result) {
-      console.log("\n✅ ✅ ✅ Load search completed successfully!");
-    } else {
-      console.log("\n⚠️  Could not extract complete load data");
-    }
-  } else {
-    console.log("\n❌ Login failed - cannot search for loads");
-  }
+    await wait(CONFIG.FOLLOW_UP_DELAY);
 
-  console.log("\n✨ Done! Browser will stay open for 30 seconds.");
-  await new Promise(resolve => setTimeout(resolve, 30000));
-  
-  await browser.close();
-  console.log("👋 Browser closed");
+    // Extract and send follow-up
+    console.log("🔎 [2] Extracting load details...");
+    const data = await searchLoad(page, ref);
+    
+    const hasCompleteData = data?.loadReference !== "N/A" && data?.pickup !== "N/A" && data?.delivery !== "N/A";
+    
+    if (hasCompleteData) {
+      console.log("✅ Complete data found\n");
+      const format1 = getFormat1(data);
+      console.log(`Subject: ${format1.subject}\n\n${format1.body}\n`);
+    } else {
+      console.log("⚠️  Load not found\n");
+      const format3 = getFormat3(ref);
+      console.log(`Subject: ${format3.subject}\n\n${format3.body}\n`);
+    }
+
+    await wait(10000);
+    await browser.close();
+  } catch (error) {
+    await browser.close();
+    throw error;
+  }
 })().catch(error => {
-  console.error("❌ Script failed:", error);
+  console.error("❌ Error:", error.message);
   process.exit(1);
 });
