@@ -1,4 +1,4 @@
-// testPuppeteer.js - Minimized version
+// testPuppeteer.js - No timeout version
 import "dotenv/config";
 import fs from "fs/promises";
 import puppeteer from "puppeteer";
@@ -41,15 +41,15 @@ async function isLoggedIn(page) {
 }
 
 async function login(page) {
-  try { await page.goto('https://app.quotefactory.com', { waitUntil: "networkidle2", timeout: 90000 }); } catch {}
+  try { await page.goto('https://app.quotefactory.com', { waitUntil: "networkidle2" }); } catch {}
   await wait(8000);
   if (await isLoggedIn(page)) return true;
 
   try {
-    await page.waitForSelector('.auth0-lock-widget', { timeout: 10000 });
+    await page.waitForSelector('.auth0-lock-widget');
     await wait(5000);
   } catch {
-    await page.waitForFunction(() => document.querySelectorAll('input[type="email"], input[type="password"]').length >= 2, { timeout: 60000 });
+    await page.waitForFunction(() => document.querySelectorAll('input[type="email"], input[type="password"]').length >= 2);
   }
 
   const emailSel = await findVisible(page, ['input[type="email"]', 'input[name="email"]', 'input[name="username"]']);
@@ -77,7 +77,7 @@ async function login(page) {
   if (!submitSel) throw new Error("Submit button not found");
 
   await page.click(submitSel);
-  try { await page.waitForNavigation({ timeout: 15000, waitUntil: 'networkidle2' }); } catch {}
+  try { await page.waitForNavigation({ waitUntil: 'networkidle2' }); } catch {}
   await wait(5000);
   
   const loggedIn = await isLoggedIn(page);
@@ -92,11 +92,11 @@ async function searchLoad(page, ref) {
   await wait(2000);
 
   try {
-    await page.waitForSelector('#search_field', { timeout: 5000 });
+    await page.waitForSelector('#search_field');
   } catch {
     await page.evaluate(() => Array.from(document.querySelectorAll('button')).find(b => /find|anything/i.test(b.textContent))?.click());
     await wait(2000);
-    await page.waitForSelector('#search_field', { timeout: 5000 });
+    await page.waitForSelector('#search_field');
   }
 
   await page.click('#search_field', { clickCount: 3 });
@@ -138,28 +138,20 @@ async function searchLoad(page, ref) {
     const commDiv = Array.from(document.querySelectorAll("div.text-black-100.text-12.pt-1.flex.items-baseline")).find(d => d.querySelector("div.font-semibold"));
     if (commDiv) {
       const strong = commDiv.querySelector("div.font-semibold")?.textContent.trim() || "";
-      const extra = Array.from(commDiv.querySelectorAll("div")).map(d => d.textContent.trim()).filter(t => t && t !== strong).join(" ");
-      commodity = [strong, extra].filter(Boolean).join(" ").trim();
+      commodity = strong.replace(/&nbsp;/g, '').trim();
     }
     
-    function parseDateTime(attr, txt) {
-      try {
-        const d = new Date(attr);
-        const mo = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        const m = txt.match(/(\d+):(\d+)\s*(am|pm)?/i);
-        let hr = 0, min = 0;
-        if (m) {
-          hr = parseInt(m[1]);
-          min = parseInt(m[2]);
-          const isPM = m[3]?.toLowerCase() === 'pm';
-          if (isPM && hr !== 12) hr += 12;
-          else if (!isPM && hr === 12) hr = 0;
-        }
-        return { date: `${mo}/${day}`, time: `${String(hr).padStart(2, '0')}:${String(min).padStart(2, '0')}` };
-      } catch {
-        return { date: 'N/A', time: 'N/A' };
+    function toMilitaryNoColon(timeStr) {
+      const match = timeStr.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+      if (!match) return timeStr.replace(/:/g, '').trim();
+      let [_, hour, minute, period] = match;
+      hour = parseInt(hour, 10);
+      if (period) {
+        period = period.toLowerCase();
+        if (period === 'pm' && hour !== 12) hour += 12;
+        if (period === 'am' && hour === 12) hour = 0;
       }
+      return `${String(hour).padStart(2, '0')}${minute}`;
     }
 
     const locs = Array.from(document.querySelectorAll('[id^="shipment-location-"]'));
@@ -173,20 +165,37 @@ async function searchLoad(page, ref) {
       const lines = Array.from(addr.querySelectorAll('div')).map(d => d.textContent.trim()).filter(Boolean);
       let cityState = lines.length > 1 ? lines[lines.length - 1].replace(/\s*\d{5}(?:-\d{4})?/, "").trim() : "";
 
-      const times = loc.querySelectorAll('.text-right time[datetime]');
+      const timeContainer = Array.from(loc.querySelectorAll('div.text-14')).find(container => container.querySelector('time'));
       let dateTime = "N/A";
-      if (times.length >= 2) {
-        const s = parseDateTime(times[0].getAttribute('datetime'), times[0].textContent.trim());
-        const e = parseDateTime(times[1].getAttribute('datetime'), times[1].textContent.trim());
-        dateTime = `${s.date} ${s.time} - ${e.time}`;
-      } else if (times.length === 1) {
-        const p = parseDateTime(times[0].getAttribute('datetime'), times[0].textContent.trim());
-        dateTime = `${p.date} ${p.time}`;
+
+      if (timeContainer) {
+        const times = timeContainer.querySelectorAll('time');
+
+        if (times.length >= 2) {
+          const startTime = toMilitaryNoColon(times[0].textContent.trim());
+          const endTime = toMilitaryNoColon(times[1].textContent.trim());
+          const datetimeAttr = times[0].getAttribute('datetime');
+          if (datetimeAttr) {
+            const d = new Date(datetimeAttr);
+            const mo = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            dateTime = `${mo}/${day} ${startTime}-${endTime}`;
+          } else dateTime = `${startTime}-${endTime}`;
+        } else if (times.length === 1) {
+          const time = toMilitaryNoColon(times[0].textContent.trim());
+          const datetimeAttr = times[0].getAttribute('datetime');
+          if (datetimeAttr) {
+            const d = new Date(datetimeAttr);
+            const mo = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            dateTime = `${mo}/${day} ${time}`;
+          } else dateTime = `${time}`;
+        }
       }
 
       const txt = loc.textContent.toLowerCase();
-      const isPickup = txt.includes('pick up') || (txt.includes('picked up') && !txt.includes('deliver'));
-      const isDelivery = txt.includes('deliver');
+      const isPickup = txt.includes('PICK UP') || (txt.includes('PICKED UP') && !txt.includes('DELIVER'));
+      const isDelivery = txt.includes('DELIVER');
 
       let finalPickup = isPickup, finalDelivery = isDelivery;
       if (!finalPickup && !finalDelivery) {
@@ -291,7 +300,7 @@ Automated response - Please reply with DAT reference number`
 }
 
 (async () => {
-  const ref = process.argv[2] || "302687";
+  const ref = process.argv[2] || "302734";
   console.log(`🚀 Processing load: ${ref}\n`);
 
   const browser = await puppeteer.launch({
@@ -305,7 +314,7 @@ Automated response - Please reply with DAT reference number`
     const cookies = await loadCookies();
     if (cookies) await page.setCookie(...cookies).catch(() => {});
 
-    try { await page.goto(CONFIG.DASHBOARD_URL, { waitUntil: "networkidle2", timeout: 90000 }); } catch {}
+    try { await page.goto(CONFIG.DASHBOARD_URL, { waitUntil: "networkidle2" }); } catch {}
     await wait(5000);
 
     let loggedIn = await isLoggedIn(page);
@@ -313,20 +322,18 @@ Automated response - Please reply with DAT reference number`
       console.log("🔐 Logging in...");
       loggedIn = await login(page);
       if (loggedIn) {
-        await page.goto(CONFIG.DASHBOARD_URL, { waitUntil: "networkidle2", timeout: 60000 }).catch(() => {});
+        await page.goto(CONFIG.DASHBOARD_URL, { waitUntil: "networkidle2" }).catch(() => {});
         await wait(3000);
       }
     }
     if (!loggedIn) throw new Error("Login failed");
 
-    // Send Format 2 immediately
     console.log("📤 [1] Sending acknowledgment...");
     const format2 = getFormat2(ref);
     console.log(`\nSubject: ${format2.subject}\n\n${format2.body}\n`);
     
     await wait(CONFIG.FOLLOW_UP_DELAY);
 
-    // Extract and send follow-up
     console.log("🔎 [2] Extracting load details...");
     const data = await searchLoad(page, ref);
     

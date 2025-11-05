@@ -1,6 +1,8 @@
-// api/webhook.js - Fixed with better Auth0 handling
+// api/webhook.js - Combined with testPuppeteer login and extraction
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
+
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 class LoadAutomationEnhanced {
     constructor() {
@@ -10,75 +12,40 @@ class LoadAutomationEnhanced {
 
     async initialize() {
         try {
-            console.log('🚀 Initializing browser for QuoteFactory...');
+            console.log('🚀 Initializing browser...');
             
-            // Try multiple browser strategies
             if (process.env.BROWSERLESS_TOKEN) {
-                // Strategy 1: Use Browserless.io service
-                console.log('🌐 Using Browserless.io service...');
-                console.log('Token length:', process.env.BROWSERLESS_TOKEN.length);
+                console.log('🌐 Using Browserless.io...');
                 try {
                     this.browser = await puppeteer.connect({
                         browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
                     });
-                } catch (browserlessError) {
-                    console.log('❌ Browserless.io failed (403 - token invalid/expired)');
-                    console.log('💡 Please get a fresh token from https://www.browserless.io/');
-                    // Continue to local chromium fallback
+                } catch (err) {
+                    console.log('❌ Browserless.io failed, using local chromium');
                 }
             }
             
-            // Strategy 2: Try local chromium if no browser yet
             if (!this.browser) {
-                console.log('🔧 Falling back to local chromium...');
                 const isLocal = !!process.env.CHROME_BIN || !!process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD;
-                
-                let launchOptions;
-                
-                if (isLocal) {
-                    // Local development
-                    launchOptions = {
-                        headless: true,
-                        args: ['--no-sandbox', '--disable-setuid-sandbox']
-                    };
-                } else {
-                    // Vercel production with @sparticuz/chromium
-                    launchOptions = {
-                        args: chromium.args,
-                        defaultViewport: chromium.defaultViewport,
-                        executablePath: await chromium.executablePath(),
-                        headless: chromium.headless,
-                        ignoreHTTPSErrors: true,
-                    };
-                }
-                
+                const launchOptions = isLocal ? {
+                    headless: true,
+                    args: ['--no-sandbox', '--disable-setuid-sandbox']
+                } : {
+                    args: chromium.args,
+                    defaultViewport: chromium.defaultViewport,
+                    executablePath: await chromium.executablePath(),
+                    headless: chromium.headless,
+                };
                 this.browser = await puppeteer.launch(launchOptions);
             }
             
             this.page = await this.browser.newPage();
+            await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
             
-            await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-            
-            // Block heavy resources to save memory and time
-            await this.page.setRequestInterception(true);
-            this.page.on('request', (req) => {
-                const url = req.url();
-                const resourceType = req.resourceType();
-                
-                if (url.includes('quotefactory.com') || url.includes('auth0.com')) {
-                    req.continue();
-                } else if (['image', 'font', 'stylesheet'].includes(resourceType)) {
-                    req.abort();
-                } else {
-                    req.continue();
-                }
-            });
-            
-            console.log('✅ Browser initialized successfully');
+            console.log('✅ Browser initialized');
             return true;
-            
         } catch (error) {
-            console.error('❌ Failed to initialize browser:', error);
+            console.error('❌ Browser init failed:', error);
             return false;
         }
     }
@@ -87,9 +54,257 @@ class LoadAutomationEnhanced {
         try {
             if (this.page) await this.page.close();
             if (this.browser) await this.browser.close();
-            console.log('✅ Browser cleanup completed');
+            console.log('✅ Cleanup completed');
         } catch (error) {
             console.error('❌ Cleanup error:', error);
+        }
+    }
+
+    async findVisible(selectors) {
+        for (const sel of selectors) {
+            try {
+                const el = await this.page.$(sel);
+                if (el && await this.page.evaluate(e => getComputedStyle(e).display !== 'none', el)) return sel;
+            } catch {}
+        }
+        return null;
+    }
+
+    async isLoggedIn() {
+        if (this.page.url().includes('auth.quotefactory.com')) return false;
+        if (this.page.url().includes('app.quotefactory.com')) {
+            await wait(2000);
+            return this.page.evaluate(() => !!(document.querySelector('nav, header, button') || document.body.textContent.includes('find')));
+        }
+        return false;
+    }
+
+    async loginToQuoteFactory() {
+        try {
+            console.log('🔐 Logging in to QuoteFactory...');
+            
+            const username = process.env.QUOTEFACTORY_USERNAME;
+            const password = process.env.QUOTEFACTORY_PASSWORD;
+            
+            if (!username || !password) {
+                console.log('❌ No credentials');
+                return false;
+            }
+
+            try {
+                await this.page.goto('https://app.quotefactory.com', { waitUntil: "networkidle2", timeout: 90000 });
+            } catch {}
+            
+            await wait(8000);
+            
+            if (await this.isLoggedIn()) {
+                console.log('✅ Already logged in');
+                return true;
+            }
+
+            try {
+                await this.page.waitForSelector('.auth0-lock-widget', { timeout: 10000 });
+                await wait(5000);
+            } catch {
+                await this.page.waitForFunction(() => 
+                    document.querySelectorAll('input[type="email"], input[type="password"]').length >= 2,
+                    { timeout: 60000 }
+                );
+            }
+
+            const emailSel = await this.findVisible(['input[type="email"]', 'input[name="email"]', 'input[name="username"]']);
+            if (!emailSel) throw new Error("Email input not found");
+            
+            await this.page.click(emailSel, { clickCount: 3 });
+            await wait(500);
+            await this.page.type(emailSel, username, { delay: 100 });
+            await wait(1500);
+
+            const passSel = await this.findVisible(['input[type="password"]', 'input[name="password"]']);
+            if (!passSel) throw new Error("Password input not found");
+            
+            await this.page.click(passSel, { clickCount: 3 });
+            await wait(500);
+            await this.page.type(passSel, password, { delay: 100 });
+            await wait(1500);
+
+            let submitSel = await this.findVisible(['button[type="submit"]', 'button[name="submit"]', '.auth0-lock-submit']);
+            if (!submitSel) {
+                submitSel = await this.page.evaluate(() => {
+                    const btn = Array.from(document.querySelectorAll('button')).find(b => /log in|sign in|continue/i.test(b.textContent));
+                    if (btn) { btn.setAttribute('data-submit', '1'); return '[data-submit="1"]'; }
+                    return null;
+                });
+            }
+            if (!submitSel) throw new Error("Submit button not found");
+
+            await this.page.click(submitSel);
+            try { await this.page.waitForNavigation({ timeout: 15000, waitUntil: 'networkidle2' }); } catch {}
+            await wait(5000);
+            
+            const loggedIn = await this.isLoggedIn();
+            if (loggedIn) {
+                console.log('✅ Login successful');
+                return true;
+            }
+            
+            console.log('❌ Login failed');
+            return false;
+        } catch (error) {
+            console.error('❌ Login error:', error.message);
+            return false;
+        }
+    }
+
+    async searchLoadInfo(loadReference) {
+        try {
+            console.log(`🔍 Searching for load: ${loadReference}`);
+            
+            await this.page.keyboard.down('Control');
+            await this.page.keyboard.press('KeyK');
+            await this.page.keyboard.up('Control');
+            await wait(2000);
+
+            try {
+                await this.page.waitForSelector('#search_field', { timeout: 5000 });
+            } catch {
+                await this.page.evaluate(() => 
+                    Array.from(document.querySelectorAll('button')).find(b => /find|anything/i.test(b.textContent))?.click()
+                );
+                await wait(2000);
+                await this.page.waitForSelector('#search_field', { timeout: 5000 });
+            }
+
+            await this.page.click('#search_field', { clickCount: 3 });
+            await this.page.type('#search_field', loadReference, { delay: 100 });
+            await this.page.keyboard.press('Enter');
+            await wait(8000);
+
+            await this.page.evaluate(() => {
+                ['.\\@container a[data-current="true"]', '.\\@container a', '.\\@container'].some(sel => {
+                    const el = document.querySelector(sel);
+                    if (el) { el.click(); return true; }
+                });
+            });
+            await wait(5000);
+
+            const loadData = await this.page.evaluate(() => {
+                const text = document.body.innerText;
+                const bolMatch = text.match(/BOL[\s\n]+(\d+)/i);
+                const loadReference = bolMatch ? bolMatch[1] : "N/A";
+                
+                let rate = "N/A";
+                const priceDiv = document.querySelector('.text-right.py-2.font-bold.order-last.px-3');
+                if (priceDiv) {
+                    const m = priceDiv.textContent.match(/\$[\d,]+\.?\d*/);
+                    if (m) rate = m[0];
+                }
+                
+                let weight = "N/A";
+                const weightDiv = Array.from(document.querySelectorAll("div")).find(d => d.textContent.trim() === "Weight");
+                if (weightDiv) {
+                    const val = weightDiv.closest(".flex")?.querySelector("div.font-semibold, .text-12, .text-15");
+                    if (val) {
+                        const txt = val.textContent.replace(/\u202F/g, "").trim();
+                        weight = txt.match(/lb/i) ? txt : `${txt} lb`;
+                    }
+                }
+                
+                let commodity = "N/A";
+                const commDiv = Array.from(document.querySelectorAll("div.text-black-100.text-12.pt-1.flex.items-baseline")).find(d => d.querySelector("div.font-semibold"));
+                if (commDiv) {
+                    const strong = commDiv.querySelector("div.font-semibold")?.textContent.trim() || "";
+                    commodity = strong.replace(/&nbsp;/g, '').trim();
+                }
+                
+                function toMilitaryNoColon(timeStr) {
+                    const match = timeStr.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+                    if (!match) return timeStr.replace(/:/g, '').trim();
+                    let [_, hour, minute, period] = match;
+                    hour = parseInt(hour, 10);
+                    if (period) {
+                        period = period.toLowerCase();
+                        if (period === 'pm' && hour !== 12) hour += 12;
+                        if (period === 'am' && hour === 12) hour = 0;
+                    }
+                    return `${String(hour).padStart(2, '0')}${minute}`;
+                }
+
+                const locs = Array.from(document.querySelectorAll('[id^="shipment-location-"]'));
+                const pickups = [], deliveries = [];
+                let foundPickup = false;
+
+                locs.forEach(loc => {
+                    const addr = loc.querySelector('address');
+                    if (!addr) return;
+
+                    const lines = Array.from(addr.querySelectorAll('div')).map(d => d.textContent.trim()).filter(Boolean);
+                    let cityState = lines.length > 1 ? lines[lines.length - 1].replace(/\s*\d{5}(?:-\d{4})?/, "").trim() : "";
+
+                    const timeContainer = Array.from(loc.querySelectorAll('div.text-14')).find(container => container.querySelector('time'));
+                    let dateTime = "N/A";
+
+                    if (timeContainer) {
+                        const times = timeContainer.querySelectorAll('time');
+
+                        if (times.length >= 2) {
+                            const startTime = toMilitaryNoColon(times[0].textContent.trim());
+                            const endTime = toMilitaryNoColon(times[1].textContent.trim());
+                            const datetimeAttr = times[0].getAttribute('datetime');
+                            if (datetimeAttr) {
+                                const d = new Date(datetimeAttr);
+                                const mo = String(d.getMonth() + 1).padStart(2, '0');
+                                const day = String(d.getDate()).padStart(2, '0');
+                                dateTime = `${mo}/${day} ${startTime}-${endTime}`;
+                            } else dateTime = `${startTime}-${endTime}`;
+                        } else if (times.length === 1) {
+                            const time = toMilitaryNoColon(times[0].textContent.trim());
+                            const datetimeAttr = times[0].getAttribute('datetime');
+                            if (datetimeAttr) {
+                                const d = new Date(datetimeAttr);
+                                const mo = String(d.getMonth() + 1).padStart(2, '0');
+                                const day = String(d.getDate()).padStart(2, '0');
+                                dateTime = `${mo}/${day} ${time}`;
+                            } else dateTime = `${time}`;
+                        }
+                    }
+
+                    const txt = loc.textContent.toLowerCase();
+                    const isPickup = txt.includes('pick up') || (txt.includes('picked up') && !txt.includes('deliver'));
+                    const isDelivery = txt.includes('deliver');
+
+                    let finalPickup = isPickup, finalDelivery = isDelivery;
+                    if (!finalPickup && !finalDelivery) {
+                        if (!foundPickup) finalPickup = true;
+                        else finalDelivery = true;
+                    }
+
+                    if (finalPickup) {
+                        foundPickup = true;
+                        pickups.push(`${cityState}, ${dateTime}`);
+                    } else if (finalDelivery) {
+                        deliveries.push(`${cityState}, ${dateTime}`);
+                    }
+                });
+
+                const pickup = pickups.length ? pickups.map((p, i) => `Pickup ${i + 1}: ${p}`).join("\n") : "N/A";
+                const delivery = deliveries.length ? deliveries.map((d, i) => `Delivery ${i + 1}: ${d}`).join("\n") : "N/A";
+
+                return { loadReference, rate, weight, commodity, pickup, delivery };
+            });
+
+            const hasCompleteData = loadData?.loadReference !== "N/A" && loadData?.pickup !== "N/A" && loadData?.delivery !== "N/A";
+            
+            if (hasCompleteData) {
+                console.log('✅ Load data found');
+                return loadData;
+            }
+            
+            console.log('⚠️ Incomplete data');
+            return null;
+        } catch (error) {
+            console.error('❌ Search failed:', error.message);
+            return null;
         }
     }
 
@@ -105,7 +320,7 @@ class LoadAutomationEnhanced {
         for (const pattern of exclusionPatterns) {
             const match = emailBody.match(pattern);
             if (match) {
-                console.log(`❌ Found exclusion pattern: ${match[0]} - ignoring`);
+                console.log(`❌ Exclusion: ${match[0]}`);
                 emailBody = emailBody.replace(pattern, '');
             }
         }
@@ -122,300 +337,37 @@ class LoadAutomationEnhanced {
         
         console.log('🔍 Searching for load reference...');
         
-        for (let i = 0; i < patterns.length; i++) {
-            const pattern = patterns[i];
+        for (const pattern of patterns) {
             const match = emailBody.match(pattern);
-            
             if (match && match[1]) {
-                let cleanMatch = match[1].trim();
-                cleanMatch = cleanMatch.replace(/[^\w\-]/g, '');
-                
-                if (cleanMatch && 
-                    cleanMatch.length >= 4 && 
+                let cleanMatch = match[1].trim().replace(/[^\w\-]/g, '');
+                if (cleanMatch && cleanMatch.length >= 4 && 
                     !cleanMatch.toUpperCase().startsWith('MC') &&
                     !cleanMatch.toUpperCase().startsWith('DOT')) {
-                    
-                    console.log(`✅ Found load reference: "${cleanMatch}"`);
+                    console.log(`✅ Found: ${cleanMatch}`);
                     return cleanMatch;
                 }
             }
         }
         
-        console.log('❌ No valid load reference found');
+        console.log('❌ No load reference found');
         return null;
     }
 
-    async loginToQuoteFactory() {
-        try {
-            console.log('🔐 Starting QuoteFactory login...');
-            
-            const username = process.env.QUOTEFACTORY_USERNAME;
-            const password = process.env.QUOTEFACTORY_PASSWORD;
-            
-            if (!username || !password) {
-                console.log('❌ No QuoteFactory credentials found');
-                return false;
-            }
-            
-            this.page.setDefaultTimeout(20000);
-            this.page.setDefaultNavigationTimeout(20000);
-            
-            // Go to main app first (may trigger login redirect)
-            await this.page.goto('https://app.quotefactory.com', {
-                waitUntil: 'domcontentloaded',
-                timeout: 20000
-            });
-            
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            
-            console.log('Current URL:', this.page.url());
-            
-            if (this.page.url().includes('/broker/dashboard')) {
-                console.log('✅ Already on dashboard!');
-                return true;
-            }
-            
-            console.log('🔄 Need to perform login...');
-            
-            // Wait for login form - could be in main page or iframe
-            try {
-                await Promise.race([
-                    this.page.waitForSelector('input[type="email"]', { timeout: 10000 }),
-                    this.page.waitForSelector('input#1-email', { timeout: 10000 }),
-                    this.page.waitForSelector('.auth0-lock-widget', { timeout: 10000 })
-                ]);
-                console.log('✅ Login form detected');
-            } catch (err) {
-                console.log('⚠️  No login form found yet, checking iframes...');
-            }
-            
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            try {
-                let loginSuccess = false;
-                let targetContext = this.page;
-                
-                // Method 1: Try main page first
-                const emailSelectors = [
-                    'input#1-email',
-                    'input[type="email"]',
-                    'input[name="username"]',
-                    'input[name="email"]'
-                ];
-                
-                let emailField = null;
-                let passwordField = null;
-                
-                // Try main page
-                for (const selector of emailSelectors) {
-                    try {
-                        emailField = await this.page.$(selector);
-                        if (emailField) {
-                            console.log(`📝 Found email field in main page: ${selector}`);
-                            passwordField = await this.page.$('input[type="password"]');
-                            break;
-                        }
-                    } catch (e) {
-                        continue;
-                    }
-                }
-                
-                // Method 2: Try Auth0 iframe if not found in main page
-                if (!emailField) {
-                    console.log('🔍 Trying Auth0 iframe...');
-                    const frames = await this.page.frames();
-                    
-                    for (const frame of frames) {
-                        const frameUrl = frame.url();
-                        if (frameUrl.includes('auth0.com')) {
-                            console.log('Found Auth0 frame:', frameUrl);
-                            
-                            try {
-                                await frame.waitForSelector('input[type="email"], input[name="username"]', { timeout: 5000 });
-                                emailField = await frame.$('input[type="email"], input[name="username"]');
-                                passwordField = await frame.$('input[type="password"]');
-                                
-                                if (emailField && passwordField) {
-                                    targetContext = frame;
-                                    console.log('📝 Found login fields in iframe');
-                                    break;
-                                }
-                            } catch (e) {
-                                console.log('⚠️  No login form in this Auth0 frame');
-                                continue;
-                            }
-                        }
-                    }
-                }
-                
-                if (emailField && passwordField) {
-                    console.log('📝 Filling credentials...');
-                    await emailField.click({ clickCount: 3 });
-                    await emailField.type(username, { delay: 50 });
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    
-                    await passwordField.click({ clickCount: 3 });
-                    await passwordField.type(password, { delay: 50 });
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    
-                    // Try to find and click submit button
-                    const submitSelectors = [
-                        'button[type="submit"]',
-                        'button[name="submit"]',
-                        'button[name="action"]',
-                        '.auth0-lock-submit'
-                    ];
-                    
-                    let submitted = false;
-                    for (const selector of submitSelectors) {
-                        try {
-                            const submitBtn = await targetContext.$(selector);
-                            if (submitBtn) {
-                                await submitBtn.click();
-                                submitted = true;
-                                console.log('✅ Clicked submit button');
-                                break;
-                            }
-                        } catch (e) {
-                            continue;
-                        }
-                    }
-                    
-                    if (!submitted) {
-                        console.log('⚠️  No submit button, pressing Enter');
-                        await targetContext.keyboard.press('Enter');
-                    }
-                    
-                    loginSuccess = true;
-                } else {
-                    console.log('❌ Could not find login fields');
-                    return false;
-                }
-                
-                if (!loginSuccess) {
-                    console.log('❌ All login methods failed');
-                    return false;
-                }
-                
-                console.log('⏳ Waiting for login to complete...');
-                await new Promise(resolve => setTimeout(resolve, 8000));
-                
-                const currentUrl = this.page.url();
-                console.log('Post-login URL:', currentUrl);
-                
-                if (currentUrl.includes('/broker/dashboard') || currentUrl.includes('/dashboard')) {
-                    console.log('✅ Login successful!');
-                    return true;
-                } else {
-                    // Try navigating to dashboard
-                    console.log('🔄 Attempting to navigate to dashboard...');
-                    await this.page.goto('https://app.quotefactory.com/broker/dashboard', {
-                        waitUntil: 'domcontentloaded',
-                        timeout: 15000
-                    });
-                    await new Promise(resolve => setTimeout(resolve, 3000));
-                    
-                    if (this.page.url().includes('/broker/dashboard')) {
-                        console.log('✅ Successfully navigated to dashboard!');
-                        return true;
-                    }
-                    
-                    console.log('❌ Login may have failed - not on dashboard');
-                    return false;
-                }
-                
-            } catch (loginError) {
-                console.log('❌ Login process failed:', loginError.message);
-                return false;
-            }
-            
-        } catch (error) {
-            console.error('❌ QuoteFactory login failed:', error.message);
-            return false;
-        }
-    }
-
-    async searchLoadInfo(loadReference) {
-        try {
-            console.log(`🔍 Searching for load: ${loadReference}`);
-            
-            // Try keyboard shortcut search
-            await this.page.keyboard.press('/');
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            // Look for focused input
-            const searchInput = await this.page.$('input:focus');
-            if (searchInput) {
-                console.log('✅ Search input found');
-                await searchInput.type(loadReference);
-                await new Promise(resolve => setTimeout(resolve, 4000));
-                
-                try {
-                    // Try to click on the search result
-                    const resultSelector = `[role="button"]:has-text("${loadReference}"), a:has-text("${loadReference}"), div:has-text("${loadReference}")`;
-                    await this.page.click(resultSelector, { timeout: 5000 });
-                } catch (e) {
-                    await this.page.keyboard.press('Enter');
-                }
-                
-                await new Promise(resolve => setTimeout(resolve, 6000));
-                
-                // Extract load information
-                const loadData = await this.page.evaluate(() => {
-                    const text = document.body.textContent || '';
-                    
-                    // Look for pickup/delivery info
-                    const locationMatches = text.match(/([A-Za-z\s]+),\s*([A-Z]{2})/g) || [];
-                    const weightMatches = text.match(/(\d{1,3}(?:,\d{3})*)\s*(lbs?|pounds?)/gi) || [];
-                    const rateMatches = text.match(/\$(\d{1,2}(?:,\d{3})*)/g) || [];
-                    
-                    return {
-                        locations: locationMatches.slice(0, 2),
-                        weights: weightMatches,
-                        rates: rateMatches,
-                        hasData: text.length > 1000 && locationMatches.length > 0,
-                        textLength: text.length
-                    };
-                });
-                
-                console.log(`Page text length: ${loadData.textLength}, Locations found: ${loadData.locations.length}`);
-                
-                if (loadData.hasData) {
-                    console.log('✅ Load data found successfully');
-                    return {
-                        pickup: loadData.locations[0] || 'Pickup TBD',
-                        delivery: loadData.locations[1] || 'Delivery TBD', 
-                        weight: loadData.weights[0] || 'Weight TBD',
-                        rate: loadData.rates[0] || 'Rate TBD'
-                    };
-                } else {
-                    console.log('⚠️ Load found but limited data available');
-                    return null;
-                }
-            }
-            
-            console.log('❌ Could not find search input');
-            return null;
-            
-        } catch (error) {
-            console.error('❌ Load search failed:', error.message);
-            return null;
-        }
-    }
-
-    formatResponse(loadReference, loadInfo, subject, originalEmail) {
+    formatResponse(loadReference, loadInfo, subject) {
         if (loadInfo) {
             return {
-                subject: `Re: ${subject}`,
+                subject: `Re: ${subject} - Complete Details`,
                 body: `Hello,
 
-Thank you for your inquiry about load ${loadReference}. Here are the details:
+Thank you for your inquiry about load ${loadInfo.loadReference}. Here are the details:
 
 📦 LOAD DETAILS:
-- Pickup: ${loadInfo.pickup}
-- Delivery: ${loadInfo.delivery}
-- Weight: ${loadInfo.weight}
-- Rate: ${loadInfo.rate}
+${loadInfo.pickup}
+${loadInfo.delivery}
+Weight: ${loadInfo.weight}
+Commodity: ${loadInfo.commodity}
+Rate: ${loadInfo.rate}
 
 🚛 CAPACITY INQUIRY:
 When and where will you be empty for pickup?
@@ -426,7 +378,7 @@ Balto Booking
 ---
 Automated response with live QuoteFactory data`
             };
-        }else if (loadReference) {
+        } else if (loadReference) {
             return {
                 subject: `Re: ${subject}`,
                 body: `Hello,
@@ -493,19 +445,14 @@ export default async function handler(req, res) {
     const automation = new LoadAutomationEnhanced();
     
     try {
-        console.log('=== Processing Email with Fixed Puppeteer Integration ===');
-        console.log('Full request body:', JSON.stringify(req.body, null, 2));
-        console.log('Subject:', req.body.subject);
-        console.log('Body Preview:', req.body.bodyPreview?.substring(0, 200));
+        console.log('=== Processing Email ===');
         
-        // Handle Zapier's data format - all data comes in req.body.JSON
         const zapierData = req.body.JSON || '';
         const emailId = req.body.id || 'unknown';
         const subject = req.body.subject || 'Load Inquiry';
         const bodyPreview = req.body.bodyPreview || '';
         const emailBodyContent = req.body.body?.content || '';
         
-        // Use Zapier data if available, otherwise fall back to structured data
         const emailContent = zapierData || bodyPreview || emailBodyContent || '';
         
         const loadReference = automation.extractLoadReference(emailContent);
@@ -514,12 +461,12 @@ export default async function handler(req, res) {
         let hasCredentials = false;
         
         if (loadReference) {
-            console.log(`✅ Found load reference: ${loadReference}`);
+            console.log(`✅ Found load: ${loadReference}`);
             
             hasCredentials = process.env.QUOTEFACTORY_USERNAME && process.env.QUOTEFACTORY_PASSWORD;
             
             if (hasCredentials) {
-                console.log('🔐 Credentials found, attempting QuoteFactory lookup...');
+                console.log('🔐 Attempting QuoteFactory lookup...');
                 
                 const browserReady = await automation.initialize();
                 if (browserReady) {
@@ -528,15 +475,11 @@ export default async function handler(req, res) {
                         loadInfo = await automation.searchLoadInfo(loadReference);
                     }
                     await automation.cleanup();
-                } else {
-                    console.log('❌ Browser initialization failed - using intelligent fallback response');
                 }
-            } else {
-                console.log('⚠️ No QuoteFactory credentials - using basic response');
             }
         }
         
-        const responseEmail = automation.formatResponse(loadReference, loadInfo, subject, emailContent);
+        const responseEmail = automation.formatResponse(loadReference, loadInfo, subject);
         
         return res.status(200).json({
             success: true,
@@ -547,18 +490,16 @@ export default async function handler(req, res) {
             quotefactoryAttempted: !!(loadReference && hasCredentials),
             quotefactorySuccess: !!(loadInfo),
             replyToEmailId: emailId,
-            timestamp: new Date().toISOString(),
-            mode: 'puppeteer-fixed'
+            timestamp: new Date().toISOString()
         });
         
     } catch (error) {
-        console.error('❌ Webhook error:', error);
-        
+        console.error('❌ Error:', error);
         await automation.cleanup();
         
         return res.status(200).json({
             success: true,
-            message: 'Error processing - fallback response',
+            message: 'Error - fallback response',
             responseSubject: 'Re: Load Inquiry',
             responseBody: 'Thank you for your email. We are processing your inquiry and will respond shortly.',
             timestamp: new Date().toISOString()
@@ -567,5 +508,5 @@ export default async function handler(req, res) {
 }
 
 export const config = {
-    maxDuration: 30,
+    maxDuration: 60,
 };
