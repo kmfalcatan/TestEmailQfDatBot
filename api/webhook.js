@@ -1,131 +1,180 @@
 // api/webhook.js
-import puppeteer from 'puppeteer-core';
-import chromium from '@sparticuz/chromium';
+import puppeteer from "puppeteer-core";
+import chromium from "@sparticuz/chromium";
 
+// -----------------------------
+// Utility helpers
+// -----------------------------
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// -----------------------------
-// Puppeteer automation class
-// -----------------------------
-class QuoteFactoryBot {
-  constructor() {
-    this.browser = null;
-    this.page = null;
-  }
-
-  async init() {
-    console.log('🚀 Launching Puppeteer...');
-    const launchOptions = process.env.CHROME_BIN
-      ? { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'], executablePath: process.env.CHROME_BIN }
-      : {
-          args: chromium.args,
-          defaultViewport: chromium.defaultViewport,
-          executablePath: await chromium.executablePath(),
-          headless: chromium.headless,
-        };
-
-    this.browser = await puppeteer.launch(launchOptions);
-    this.page = await this.browser.newPage();
-
-    await this.page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-  }
-
-  async isLoggedIn() {
-    const url = this.page.url();
-    if (url.includes('auth.quotefactory.com')) return false;
-    if (url.includes('app.quotefactory.com')) {
-      await wait(2000);
-      return this.page.evaluate(() => !!document.querySelector('nav, header, button'));
-    }
-    return false;
-  }
-
-  async login() {
-    console.log('🔐 Logging into QuoteFactory...');
-    const username = process.env.QUOTEFACTORY_USERNAME;
-    const password = process.env.QUOTEFACTORY_PASSWORD;
-    if (!username || !password) throw new Error('Missing credentials');
-
-    await this.page.goto('https://app.quotefactory.com', { waitUntil: 'networkidle2', timeout: 60000 });
-    await wait(5000);
-    if (await this.isLoggedIn()) return true;
-
-    await this.page.waitForFunction(
-      () => document.querySelectorAll('input[type="email"], input[type="password"]').length >= 2,
-      { timeout: 30000 }
-    );
-
-    await this.page.type('input[type="email"]', username, { delay: 100 });
-    await wait(500);
-    await this.page.type('input[type="password"]', password, { delay: 100 });
-    await wait(500);
-
-    const btn = await this.page.$('button[type="submit"], .auth0-lock-submit');
-    if (btn) await btn.click();
-    await wait(8000);
-
-    const success = await this.isLoggedIn();
-    console.log(success ? '✅ Login successful' : '❌ Login failed');
-    return success;
-  }
-
-  async searchLoad(loadRef) {
-    console.log(`🔍 Searching for load reference: ${loadRef}`);
+async function findVisible(page, selectors) {
+  for (const sel of selectors) {
     try {
-      // Open search box (Ctrl + K shortcut)
-      await this.page.keyboard.down('Control');
-      await this.page.keyboard.press('KeyK');
-      await this.page.keyboard.up('Control');
-      await wait(2000);
-
-      await this.page.waitForSelector('#search_field', { timeout: 8000 });
-      await this.page.click('#search_field', { clickCount: 3 });
-      await this.page.type('#search_field', loadRef, { delay: 100 });
-      await this.page.keyboard.press('Enter');
-      await wait(8000);
-
-      // Extract results
-      const result = await this.page.evaluate(() => {
-        const txt = document.body.innerText;
-        const matchRate = txt.match(/\$\s?[\d,]+/);
-        const matchWeight = txt.match(/[\d,]+\s?(?:lb|lbs|pounds)/i);
-        const locs = Array.from(document.querySelectorAll('address')).map((a) => a.textContent.trim());
-        return {
-          rate: matchRate ? matchRate[0] : 'N/A',
-          weight: matchWeight ? matchWeight[0] : 'N/A',
-          pickup: locs[0] || 'Pickup TBD',
-          delivery: locs[1] || 'Delivery TBD',
-        };
-      });
-
-      console.log('✅ Load data found:', result);
-      return result;
-    } catch (err) {
-      console.log('⚠️ Load search failed:', err.message);
-      return null;
-    }
-  }
-
-  async close() {
-    try {
-      if (this.page) await this.page.close();
-      if (this.browser) await this.browser.close();
+      const el = await page.$(sel);
+      if (el && await page.evaluate(e => getComputedStyle(e).display !== 'none', el)) return sel;
     } catch {}
   }
+  return null;
+}
+
+async function isLoggedIn(page) {
+  if (page.url().includes('auth.quotefactory.com')) return false;
+  if (page.url().includes('app.quotefactory.com')) {
+    await wait(2000);
+    return page.evaluate(() =>
+      !!(document.querySelector('nav, header, button') || document.body.textContent.includes('find'))
+    );
+  }
+  return false;
+}
+
+async function login(page) {
+  const username = process.env.QUOTEFACTORY_USERNAME;
+  const password = process.env.QUOTEFACTORY_PASSWORD;
+
+  if (!username || !password) throw new Error("Missing credentials");
+
+  try { await page.goto("https://app.quotefactory.com", { waitUntil: "networkidle2" }); } catch {}
+  await wait(8000);
+  if (await isLoggedIn(page)) return true;
+
+  try {
+    await page.waitForSelector(".auth0-lock-widget", { timeout: 10000 });
+    await wait(3000);
+  } catch {
+    await page.waitForFunction(() =>
+      document.querySelectorAll('input[type="email"], input[type="password"]').length >= 2
+    );
+  }
+
+  const emailSel = await findVisible(page, [
+    'input[type="email"]', 'input[name="email"]', 'input[name="username"]'
+  ]);
+  if (!emailSel) throw new Error("Email input not found");
+  await page.click(emailSel, { clickCount: 3 });
+  await wait(500);
+  await page.type(emailSel, username, { delay: 100 });
+
+  const passSel = await findVisible(page, [
+    'input[type="password"]', 'input[name="password"]'
+  ]);
+  if (!passSel) throw new Error("Password input not found");
+  await page.click(passSel, { clickCount: 3 });
+  await wait(500);
+  await page.type(passSel, password, { delay: 100 });
+
+  let submitSel = await findVisible(page, [
+    'button[type="submit"]', 'button[name="submit"]', '.auth0-lock-submit'
+  ]);
+  if (!submitSel) {
+    submitSel = await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll("button"))
+        .find(b => /log in|sign in|continue/i.test(b.textContent));
+      if (btn) { btn.setAttribute("data-submit", "1"); return '[data-submit="1"]'; }
+      return null;
+    });
+  }
+  if (!submitSel) throw new Error("Submit button not found");
+
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {}),
+    page.click(submitSel)
+  ]);
+  await wait(5000);
+
+  const loggedIn = await isLoggedIn(page);
+  return loggedIn;
+}
+
+async function searchLoad(page, ref) {
+  console.log(`🔍 Searching for load reference: ${ref}`);
+
+  // Navigate to Loads page
+  await page.goto("https://app.quotefactory.com/broker/dashboard", { waitUntil: "networkidle2" });
+  await wait(4000);
+
+  // Try to open search bar
+  try {
+    await page.keyboard.down("Control");
+    await page.keyboard.press("KeyK");
+    await page.keyboard.up("Control");
+    await wait(2000);
+  } catch {}
+
+  try {
+    await page.waitForSelector("#search_field", { timeout: 8000 });
+  } catch {
+    await page.evaluate(() => {
+      Array.from(document.querySelectorAll("button")).find(b => /find|anything/i.test(b.textContent))?.click();
+    });
+    await wait(2000);
+    await page.waitForSelector("#search_field", { timeout: 8000 });
+  }
+
+  await page.click("#search_field", { clickCount: 3 });
+  await page.type("#search_field", ref, { delay: 100 });
+  await page.keyboard.press("Enter");
+  await wait(8000);
+
+  // Click into load card
+  await page.evaluate(() => {
+    ['.\\@container a[data-current="true"]', '.\\@container a', '.\\@container'].some(sel => {
+      const el = document.querySelector(sel);
+      if (el) { el.click(); return true; }
+    });
+  });
+  await wait(5000);
+
+  return await page.evaluate(() => {
+    const text = document.body.innerText;
+    const bolMatch = text.match(/BOL[\s\n]+(\d+)/i);
+    const loadReference = bolMatch ? bolMatch[1] : "N/A";
+
+    let rate = "N/A";
+    const priceDiv = document.querySelector(".text-right.py-2.font-bold.order-last.px-3");
+    if (priceDiv) {
+      const m = priceDiv.textContent.match(/\$[\d,]+\.?\d*/);
+      if (m) rate = m[0];
+    }
+
+    let weight = "N/A";
+    const weightDiv = Array.from(document.querySelectorAll("div")).find(d => d.textContent.trim() === "Weight");
+    if (weightDiv) {
+      const val = weightDiv.closest(".flex")?.querySelector("div.font-semibold, .text-12, .text-15");
+      if (val) {
+        const txt = val.textContent.replace(/\u202F/g, "").trim();
+        weight = txt.match(/lb/i) ? txt : `${txt} lb`;
+      }
+    }
+
+    const locs = Array.from(document.querySelectorAll('[id^="shipment-location-"]'));
+    const pickups = [], deliveries = [];
+    locs.forEach((loc, i) => {
+      const addr = loc.querySelector("address");
+      if (!addr) return;
+      const lines = Array.from(addr.querySelectorAll("div")).map(d => d.textContent.trim()).filter(Boolean);
+      let cityState = lines.length > 1 ? lines[lines.length - 1].replace(/\s*\d{5}(?:-\d{4})?/, "").trim() : "";
+      const txt = loc.textContent.toLowerCase();
+      if (txt.includes("pick up")) pickups.push(cityState);
+      if (txt.includes("deliver")) deliveries.push(cityState);
+    });
+
+    const pickup = pickups.length ? pickups.join(", ") : "N/A";
+    const delivery = deliveries.length ? deliveries.join(", ") : "N/A";
+
+    return { loadReference, rate, weight, pickup, delivery };
+  });
 }
 
 // -----------------------------
-// Email formatting helpers
+// Email formatting
 // -----------------------------
-function formatEmail(ref, data) {
-  if (data) {
-    return {
-      subject: `Re: Load Inquiry - ${ref}`,
-      body: `Hello,
+function getFormat1(data) {
+  return {
+    subject: `Re: Load Inquiry - ${data.loadReference} - Complete Details`,
+    body: `Hello,
 
-Thank you for your inquiry about load ${ref}. Here are the details:
+Thank you for your inquiry about load ${data.loadReference}. Here are the details:
 
 📦 LOAD DETAILS:
 Pickup: ${data.pickup}
@@ -140,9 +189,11 @@ Best regards,
 Balto Booking
 
 ---
-Automated response with live QuoteFactory data`,
-    };
-  }
+Automated response with live QuoteFactory data`
+  };
+}
+
+function getFormat2(ref) {
   return {
     subject: `Re: Load Inquiry - ${ref}`,
     body: `Hello,
@@ -156,17 +207,28 @@ Best regards,
 Balto Booking
 
 ---
-Professional freight services with real-time load tracking`,
+Professional freight services with real-time load tracking`
   };
 }
 
-function extractLoadRef(emailBody = '') {
+function getFormat3(ref) {
+  return {
+    subject: `Re: Load Inquiry - DAT Reference Needed`,
+    body: `Hello,
+
+Please provide the DAT or QuoteFactory load reference number to retrieve details.
+
+Thanks,
+Balto Booking`
+  };
+}
+
+function extractLoadRef(emailBody = "") {
   const patterns = [
     /order\s*#?\s*(\d{5,8})/i,
     /reference\s+number\s+(\d{5,8})/i,
     /ref[:\s]+(\d{5,8})/i,
-    /\b(\d{5,8})\b/i,
-    /(?:load\s*(?:ref|reference|number|id|#)[:\-\s]*)([A-Z0-9\-\_]+)/i,
+    /\b(\d{5,8})\b/i
   ];
   for (const p of patterns) {
     const m = emailBody.match(p);
@@ -176,51 +238,54 @@ function extractLoadRef(emailBody = '') {
 }
 
 // -----------------------------
-// Webhook handler for Zapier
+// Main webhook handler
 // -----------------------------
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const emailBody = req.body.bodyPreview || req.body.body?.content || '';
-  const subject = req.body.subject || 'Load Inquiry';
+  const emailBody = req.body.bodyPreview || req.body.body?.content || "";
+  const subject = req.body.subject || "Load Inquiry";
   const loadRef = extractLoadRef(emailBody);
 
   if (!loadRef) {
-    return res.json({
-      success: true,
-      responseSubject: `Re: ${subject} - DAT Reference Needed`,
-      responseBody:
-        'Hello,\n\nPlease provide the DAT or QuoteFactory load reference number to retrieve details.\n\nThanks,\nBalto Booking',
-    });
+    const { subject: s, body: b } = getFormat3();
+    return res.json({ success: true, responseSubject: s, responseBody: b });
   }
 
-  const bot = new QuoteFactoryBot();
+  console.log(`🚀 Processing load reference: ${loadRef}`);
   let data = null;
 
+  const launchOptions = {
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath: await chromium.executablePath(),
+    headless: chromium.headless,
+  };
+
+  const browser = await puppeteer.launch(launchOptions);
+  const page = await browser.newPage();
+
   try {
-    await bot.init();
-    const loggedIn = await bot.login();
-    if (loggedIn) {
-      data = await bot.searchLoad(loadRef);
-    } else {
-      console.log('❌ Login failed, skipping search.');
-    }
+    const loggedIn = await login(page);
+    if (loggedIn) data = await searchLoad(page, loadRef);
   } catch (err) {
-    console.error('❌ Puppeteer error:', err.message);
+    console.error("❌ Puppeteer error:", err.message);
   } finally {
-    await bot.close();
+    await browser.close();
   }
 
-  const { subject: replySub, body: replyBody } = formatEmail(loadRef, data);
+  const hasData = data && data.loadReference !== "N/A" && data.pickup !== "N/A" && data.delivery !== "N/A";
+  const format = hasData ? getFormat1(data) : getFormat2(loadRef);
+
   res.json({
     success: true,
     loadRef,
-    data: data || null,
-    responseSubject: replySub,
-    responseBody: replyBody,
+    data,
+    responseSubject: format.subject,
+    responseBody: format.body,
     timestamp: new Date().toISOString(),
   });
 }
 
-// Required for Vercel’s function timeout limit
-export const config = { maxDuration: 30 };
+// Required for Vercel timeout
+export const config = { maxDuration: 60 };
