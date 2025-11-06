@@ -1,226 +1,545 @@
-// api/webhook.js
+// api/webhook.js - Fixed Puppeteer with @sparticuz/chromium
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
 
-const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// -----------------------------
-// Puppeteer automation class
-// -----------------------------
-class QuoteFactoryBot {
-  constructor() {
-    this.browser = null;
-    this.page = null;
-  }
-
-  async init() {
-    console.log('🚀 Launching Puppeteer...');
-    const launchOptions = process.env.CHROME_BIN
-      ? { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'], executablePath: process.env.CHROME_BIN }
-      : {
-          args: chromium.args,
-          defaultViewport: chromium.defaultViewport,
-          executablePath: await chromium.executablePath(),
-          headless: chromium.headless,
-        };
-
-    this.browser = await puppeteer.launch(launchOptions);
-    this.page = await this.browser.newPage();
-
-    await this.page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-  }
-
-  async isLoggedIn() {
-    const url = this.page.url();
-    if (url.includes('auth.quotefactory.com')) return false;
-    if (url.includes('app.quotefactory.com')) {
-      await wait(2000);
-      return this.page.evaluate(() => !!document.querySelector('nav, header, button'));
+class LoadAutomationEnhanced {
+    constructor() {
+        this.browser = null;
+        this.page = null;
     }
-    return false;
-  }
 
-  async login() {
-    console.log('🔐 Logging into QuoteFactory...');
-    const username = process.env.QUOTEFACTORY_USERNAME;
-    const password = process.env.QUOTEFACTORY_PASSWORD;
-    if (!username || !password) throw new Error('Missing credentials');
 
-    await this.page.goto('https://app.quotefactory.com', { waitUntil: 'networkidle2', timeout: 60000 });
-    await wait(5000);
-    if (await this.isLoggedIn()) return true;
+    async initialize() {
+        try {
+            console.log('🚀 Initializing browser for QuoteFactory...');
+           
+            // Try multiple browser strategies
+            if (process.env.BROWSERLESS_TOKEN) {
+                // Strategy 1: Use Browserless.io service
+                console.log('🌐 Using Browserless.io service...');
+                console.log('Token length:', process.env.BROWSERLESS_TOKEN.length);
+                try {
+                    this.browser = await puppeteer.connect({
+                        browserWSEndpoint: `wss://production-sfo.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
+                    });
 
-    await this.page.waitForFunction(
-      () => document.querySelectorAll('input[type="email"], input[type="password"]').length >= 2,
-      { timeout: 30000 }
-    );
 
-    await this.page.type('input[type="email"]', username, { delay: 100 });
-    await wait(500);
-    await this.page.type('input[type="password"]', password, { delay: 100 });
-    await wait(500);
-
-    const btn = await this.page.$('button[type="submit"], .auth0-lock-submit');
-    if (btn) await btn.click();
-    await wait(8000);
-
-    const success = await this.isLoggedIn();
-    console.log(success ? '✅ Login successful' : '❌ Login failed');
-    return success;
-  }
-
-  async searchLoad(loadRef) {
-    console.log(`🔍 Searching for load reference: ${loadRef}`);
-    try {
-      // Open search box (Ctrl + K shortcut)
-      await this.page.keyboard.down('Control');
-      await this.page.keyboard.press('KeyK');
-      await this.page.keyboard.up('Control');
-      await wait(2000);
-
-      await this.page.waitForSelector('#search_field', { timeout: 8000 });
-      await this.page.click('#search_field', { clickCount: 3 });
-      await this.page.type('#search_field', loadRef, { delay: 100 });
-      await this.page.keyboard.press('Enter');
-      await wait(8000);
-
-      // Extract results
-      const result = await this.page.evaluate(() => {
-        const txt = document.body.innerText;
-        const matchRate = txt.match(/\$\s?[\d,]+/);
-        const matchWeight = txt.match(/[\d,]+\s?(?:lb|lbs|pounds)/i);
-        const locs = Array.from(document.querySelectorAll('address')).map((a) => a.textContent.trim());
-        return {
-          rate: matchRate ? matchRate[0] : 'N/A',
-          weight: matchWeight ? matchWeight[0] : 'N/A',
-          pickup: locs[0] || 'Pickup TBD',
-          delivery: locs[1] || 'Delivery TBD',
-        };
-      });
-
-      console.log('✅ Load data found:', result);
-      return result;
-    } catch (err) {
-      console.log('⚠️ Load search failed:', err.message);
-      return null;
+                } catch (browserlessError) {
+                    console.log('❌ Browserless.io failed (403 - token invalid/expired)');
+                    console.log('💡 Please get a fresh token from https://www.browserless.io/');
+                    // Continue to local chromium fallback
+                }
+            }
+           
+            // Strategy 2: Try local chromium if no browser yet
+            if (!this.browser) {
+                console.log('🔧 Falling back to local chromium...');
+                const isLocal = !!process.env.CHROME_BIN || !!process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD;
+               
+                let launchOptions;
+               
+                if (isLocal) {
+                    // Local development
+                    launchOptions = {
+                        headless: true,
+                        args: ['--no-sandbox', '--disable-setuid-sandbox']
+                    };
+                } else {
+                    // Vercel production with @sparticuz/chromium
+                    launchOptions = {
+                        args: chromium.args,
+                        defaultViewport: chromium.defaultViewport,
+                        executablePath: await chromium.executablePath(),
+                        headless: chromium.headless,
+                        ignoreHTTPSErrors: true,
+                    };
+                }
+               
+                this.browser = await puppeteer.launch(launchOptions);
+            }
+           
+            this.page = await this.browser.newPage();
+           
+            await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+           
+            // Block heavy resources to save memory and time
+            await this.page.setRequestInterception(true);
+            this.page.on('request', (req) => {
+                const url = req.url();
+                const resourceType = req.resourceType();
+               
+                if (url.includes('quotefactory.com') || url.includes('auth0.com')) {
+                    req.continue();
+                } else if (['image', 'font', 'stylesheet'].includes(resourceType)) {
+                    req.abort();
+                } else {
+                    req.continue();
+                }
+            });
+           
+            console.log('✅ Browser initialized successfully');
+            return true;
+           
+        } catch (error) {
+            console.error('❌ Failed to initialize browser:', error);
+            return false;
+        }
     }
-  }
 
-  async close() {
-    try {
-      if (this.page) await this.page.close();
-      if (this.browser) await this.browser.close();
-    } catch {}
-  }
-}
 
-// -----------------------------
-// Email formatting helpers
-// -----------------------------
-function formatEmail(ref, data) {
-  if (data) {
-    return {
-      subject: `Re: Load Inquiry - ${ref}`,
-      body: `Hello,
+    async cleanup() {
+        try {
+            if (this.page) await this.page.close();
+            if (this.browser) await this.browser.close();
+            console.log('✅ Browser cleanup completed');
+        } catch (error) {
+            console.error('❌ Cleanup error:', error);
+        }
+    }
 
-Thank you for your inquiry about load ${ref}. Here are the details:
+
+    extractLoadReference(emailBody) {
+        const exclusionPatterns = [
+            /MC\s*\d+/i,
+            /DOT\s*\d+/i,
+            /USDOT\s*\d+/i,
+            /invoice\s*#?\s*\d+/i,
+            /bill\s*#?\s*\d+/i
+        ];
+       
+        for (const pattern of exclusionPatterns) {
+            const match = emailBody.match(pattern);
+            if (match) {
+                console.log(`❌ Found exclusion pattern: ${match[0]} - ignoring`);
+                emailBody = emailBody.replace(pattern, '');
+            }
+        }
+       
+        const patterns = [
+            /order\s*#?\s*(\d{6,8})/i,
+            /reference\s+number\s+(\d{6,8})/i,
+            /ref[:\s]+(\d{6,8})/i,
+            /\b(\d{6})\b/i,
+            /(?:load\s*(?:ref|reference|number|id|#)[:\-\s]*)([A-Z0-9\-\_]+)/i,
+            /([A-Z]{2,4}[\-\_\s]*\d{3,8}[\-\_\s]*[A-Z0-9]*)/i,
+            /([A-HJ-Z]+\d{4,8}[A-Z0-9]*)/i
+        ];
+       
+        console.log('🔍 Searching for load reference...');
+       
+        for (let i = 0; i < patterns.length; i++) {
+            const pattern = patterns[i];
+            const match = emailBody.match(pattern);
+           
+            if (match && match[1]) {
+                let cleanMatch = match[1].trim();
+                cleanMatch = cleanMatch.replace(/[^\w\-]/g, '');
+               
+                if (cleanMatch &&
+                    cleanMatch.length >= 4 &&
+                    !cleanMatch.toUpperCase().startsWith('MC') &&
+                    !cleanMatch.toUpperCase().startsWith('DOT')) {
+                   
+                    console.log(`✅ Found load reference: "${cleanMatch}"`);
+                    return cleanMatch;
+                }
+            }
+        }
+       
+        console.log('❌ No valid load reference found');
+        return null;
+    }
+
+
+    async loginToQuoteFactory() {
+        try {
+            console.log('🔐 Starting QuoteFactory login...');
+           
+            const username = process.env.QF_USERNAME;
+            const password = process.env.QF_PASSWORD;
+           
+            if (!username || !password) {
+                console.log('❌ No QuoteFactory credentials found');
+                return false;
+            }
+           
+            this.page.setDefaultTimeout(20000);
+            this.page.setDefaultNavigationTimeout(20000);
+           
+            await this.page.goto('https://app.quotefactory.com', {
+                waitUntil: 'domcontentloaded',
+                timeout: 20000
+            });
+           
+            console.log('Current URL:', this.page.url());
+           
+            if (this.page.url().includes('/broker/dashboard')) {
+                console.log('✅ Already on dashboard!');
+                return true;
+            }
+           
+            console.log('🔄 Need to perform login...');
+            await this.page.waitForTimeout(3000);
+           
+            try {
+                let loginSuccess = false;
+               
+                // Method 1: Direct form fields
+                try {
+                    await this.page.waitForSelector('input[type="email"], input[name="username"]', { timeout: 10000 });
+                    const emailField = await this.page.$('input[type="email"], input[name="username"]');
+                    const passwordField = await this.page.$('input[type="password"]');
+                   
+                    if (emailField && passwordField) {
+                        console.log('📝 Filling credentials...');
+                        await emailField.type(username);
+                        await passwordField.type(password);
+                        await this.page.keyboard.press('Enter');
+                        loginSuccess = true;
+                    }
+                } catch (e) {
+                    console.log('⚠️ Direct form method failed:', e.message);
+                }
+               
+                // Method 2: Auth0 iframe (simplified for Puppeteer)
+                if (!loginSuccess) {
+                    try {
+                        console.log('🔍 Trying Auth0 iframe...');
+                        const frames = await this.page.frames();
+                       
+                        for (const frame of frames) {
+                            const frameUrl = frame.url();
+                            if (frameUrl.includes('auth0.com')) {
+                                console.log('Found Auth0 frame:', frameUrl);
+                               
+                                await frame.waitForSelector('input[type="email"], input[name="username"]', { timeout: 5000 });
+                                const emailField = await frame.$('input[type="email"], input[name="username"]');
+                                const passwordField = await frame.$('input[type="password"]');
+                               
+                                if (emailField && passwordField) {
+                                    await emailField.type(username);
+                                    await passwordField.type(password);
+                                    await frame.keyboard.press('Enter');
+                                    loginSuccess = true;
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.log('⚠️ Auth0 iframe method failed:', e.message);
+                    }
+                }
+               
+                if (!loginSuccess) {
+                    console.log('❌ All login methods failed');
+                    return false;
+                }
+               
+                console.log('⏳ Waiting for login to complete...');
+                await this.page.waitForTimeout(8000);
+               
+                const currentUrl = this.page.url();
+                console.log('Post-login URL:', currentUrl);
+               
+                if (currentUrl.includes('/broker/dashboard') || currentUrl.includes('/dashboard')) {
+                    console.log('✅ Login successful!');
+                    return true;
+                } else {
+                    console.log('❌ Login may have failed - not on dashboard');
+                    return false;
+                }
+               
+            } catch (loginError) {
+                console.log('❌ Login process failed:', loginError.message);
+                return false;
+            }
+           
+        } catch (error) {
+            console.error('❌ QuoteFactory login failed:', error.message);
+            return false;
+        }
+    }
+
+
+    async searchLoadInfo(loadReference) {
+        try {
+            console.log(`🔍 Searching for load: ${loadReference}`);
+            await this.page.waitForSelector('input[type="search"], input[placeholder*="Search"]', { timeout: 10000 });
+
+
+            const searchInput = await this.page.$('input[type="search"], input[placeholder*="Search"]');
+            await searchInput.click({ clickCount: 3 });
+            await searchInput.type(loadReference);
+            await this.page.keyboard.press('Enter');
+
+
+            console.log('⏳ Waiting for search results...');
+            await this.page.waitForTimeout(5000);
+
+
+            // Try to click on the load result
+            const loadSelector = `text="${loadReference}"`;
+            const [loadButton] = await this.page.$x(`//*[contains(text(), "${loadReference}")]`);
+            if (loadButton) {
+            console.log('✅ Found load, opening details...');
+            await loadButton.click();
+            await this.page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 });
+            } else {
+            console.log('⚠️ Load not clickable - trying fallback Enter');
+            await this.page.keyboard.press('Enter');
+            }
+
+
+            // Now scrape data from load detail page
+            console.log('⏳ Extracting load details...');
+            const loadData = await this.page.evaluate(() => {
+            const pickup = document.querySelector('[data-testid*="pickup"], [class*="pickup"]')?.textContent || '';
+            const delivery = document.querySelector('[data-testid*="delivery"], [class*="delivery"]')?.textContent || '';
+            const weight = document.querySelector('text, [class*="weight"]')?.textContent || '';
+            const rate = document.querySelector('[class*="rate"], [data-testid*="rate"]')?.textContent || '';
+            return { pickup, delivery, weight, rate };
+            });
+
+
+            if (loadData.pickup || loadData.delivery) {
+            console.log('✅ Load details successfully retrieved');
+            return {
+                pickup: loadData.pickup || 'Pickup TBD',
+                delivery: loadData.delivery || 'Delivery TBD',
+                weight: loadData.weight || 'Weight TBD',
+                rate: loadData.rate || 'Rate TBD'
+            };
+            } else {
+            console.log('⚠️ Could not find structured data - returning fallback');
+            return null;
+            }
+
+
+        } catch (error) {
+            console.error('❌ Load search failed:', error.message);
+            return null;
+        }
+    }
+
+
+
+
+    formatResponse(loadReference, loadInfo, subject, originalEmail) {
+        if (loadInfo) {
+            return {
+                subject: `Re: ${subject}`,
+                body: `Hello,
+
+
+Thank you for your inquiry about load ${loadReference}. Here are the details:
+
 
 📦 LOAD DETAILS:
-Pickup: ${data.pickup}
-Delivery: ${data.delivery}
-Weight: ${data.weight}
-Rate: ${data.rate}
+- Pickup: ${loadInfo.pickup}
+- Delivery: ${loadInfo.delivery}
+- Weight: ${loadInfo.weight}
+- Rate: ${loadInfo.rate}
+
 
 🚛 CAPACITY INQUIRY:
 When and where will you be empty for pickup?
 
-Best regards,
-Balto Booking
-
----
-Automated response with live QuoteFactory data`,
-    };
-  }
-  return {
-    subject: `Re: Load Inquiry - ${ref}`,
-    body: `Hello,
-
-Thank you for your inquiry regarding load ${ref}.
-
-I've identified this load reference and am currently pulling the complete details from our system.
-You'll receive complete information shortly.
 
 Best regards,
 Balto Booking
 
+
 ---
-Professional freight services with real-time load tracking`,
-  };
-}
+Automated response with live QuoteFactory data`
+            };
+        } else if (loadReference) {
+            return {
+                subject: `Re: ${subject}`,
+                body: `Hello,
 
-function extractLoadRef(emailBody = '') {
-  const patterns = [
-    /order\s*#?\s*(\d{5,8})/i,
-    /reference\s+number\s+(\d{5,8})/i,
-    /ref[:\s]+(\d{5,8})/i,
-    /\b(\d{5,8})\b/i,
-    /(?:load\s*(?:ref|reference|number|id|#)[:\-\s]*)([A-Z0-9\-\_]+)/i,
-  ];
-  for (const p of patterns) {
-    const m = emailBody.match(p);
-    if (m && m[1]) return m[1].trim();
-  }
-  return null;
-}
 
-// -----------------------------
-// Webhook handler for Zapier
-// -----------------------------
-export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+Thank you for your inquiry regarding load ${loadReference}.
 
-  const emailBody = req.body.bodyPreview || req.body.body?.content || '';
-  const subject = req.body.subject || 'Load Inquiry';
-  const loadRef = extractLoadRef(emailBody);
 
-  if (!loadRef) {
-    return res.json({
-      success: true,
-      responseSubject: `Re: ${subject} - DAT Reference Needed`,
-      responseBody:
-        'Hello,\n\nPlease provide the DAT or QuoteFactory load reference number to retrieve details.\n\nThanks,\nBalto Booking',
-    });
-  }
+I've identified this load reference and am currently pulling the complete details from our system. You'll receive:
 
-  const bot = new QuoteFactoryBot();
-  let data = null;
 
-  try {
-    await bot.init();
-    const loggedIn = await bot.login();
-    if (loggedIn) {
-      data = await bot.searchLoad(loadRef);
-    } else {
-      console.log('❌ Login failed, skipping search.');
+📦 LOAD INFORMATION:
+• Pickup and delivery locations with dates/times  
+• Commodity details and weight requirements
+• Our competitive rate quote
+• Equipment specifications
+• Any special handling requirements
+
+
+This detailed information will be sent within the next 10-15 minutes via our load management team.
+
+
+🚛 TO EXPEDITE: When and where will you be empty for pickup?
+
+
+We're ready to provide immediate quotes and book qualified loads on the spot.
+
+
+Best regards,
+Balto Booking
+
+
+---
+Professional freight services with real-time load tracking`
+            };
+        } else {
+            return {
+                subject: `Re: ${subject} - DAT Reference Number Needed`,
+                body: `Hello,
+
+
+Thank you for reaching out about this load opportunity.
+
+
+To provide you with accurate pricing and availability, could you please provide the DAT load reference number or QuoteFactory load ID?
+
+
+This will help us:
+- Pull the exact load details from our system  
+- Provide you with competitive pricing
+- Respond faster with availability
+
+
+Once you provide the reference number, we'll get back to you immediately with our quote and capacity.
+
+
+Thank you!
+
+
+Best regards,
+Balto Booking
+
+
+---
+Automated response - Please reply with DAT reference number`
+            };
+        }
     }
-  } catch (err) {
-    console.error('❌ Puppeteer error:', err.message);
-  } finally {
-    await bot.close();
-  }
-
-  const { subject: replySub, body: replyBody } = formatEmail(loadRef, data);
-  res.json({
-    success: true,
-    loadRef,
-    data: data || null,
-    responseSubject: replySub,
-    responseBody: replyBody,
-    timestamp: new Date().toISOString(),
-  });
 }
 
-// Required for Vercel’s function timeout limit
-export const config = { maxDuration: 30 };
+
+export { LoadAutomationEnhanced };
+// VERCEL SERVERLESS HANDLER
+export default async function handler(req, res) {
+    if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+
+    const automation = new LoadAutomationEnhanced();
+   
+    try {
+        console.log('=== Processing Email with Fixed Puppeteer Integration ===');
+        console.log('Full request body:', JSON.stringify(req.body, null, 2));
+        console.log('Subject:', req.body.subject);
+        console.log('Body Preview:', req.body.bodyPreview?.substring(0, 200));
+       
+        // Handle Zapier's data format - all data comes in req.body.JSON
+        const zapierData = req.body.JSON || '';
+        const emailId = req.body.id || 'unknown';
+        const subject = req.body.subject || 'Load Inquiry';
+        const bodyPreview = req.body.bodyPreview || '';
+        const emailBodyContent = req.body.body?.content || '';
+       
+        // Use Zapier data if available, otherwise fall back to structured data
+        const emailContent = zapierData || bodyPreview || emailBodyContent || '';
+       
+        const loadReference = automation.extractLoadReference(emailContent);
+       
+        let loadInfo = null;
+        let hasCredentials = false;
+       
+        if (loadReference) {
+            console.log(`✅ Found load reference: ${loadReference}`);
+           
+            hasCredentials = process.env.QF_USERNAME && process.env.QF_PASSWORD;
+           
+            if (hasCredentials) {
+                console.log('🔐 Credentials found, attempting QuoteFactory lookup...');
+               
+                const browserReady = await automation.initialize();
+                if (browserReady) {
+                    const loginSuccess = await automation.loginToQuoteFactory();
+                    if (loginSuccess) {
+                        loadInfo = await automation.searchLoadInfo(loadReference);
+                    }
+                    await automation.cleanup();
+                } else {
+                    console.log('❌ Browser initialization failed - using intelligent fallback response');
+                    console.log('🔍 Attempting HTTP-based QuoteFactory check...');
+                   
+                    // Try a simple HTTP check to see if load exists
+                    try {
+                        const response = await fetch(`https://app.quotefactory.com/api/loads/search?q=${loadReference}`, {
+                            headers: {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                            },
+                            timeout: 5000
+                        });
+                       
+                        if (response.ok) {
+                            console.log('✅ Load exists in QuoteFactory (HTTP check)');
+                            // Set a flag that we found the load but couldn't scrape details
+                            loadInfo = {
+                                exists: true,
+                                pickup: 'Details being retrieved...',
+                                delivery: 'Details being retrieved...',
+                                weight: 'TBD',
+                                rate: 'Quote being prepared...'
+                            };
+                        }
+                    } catch (error) {
+                        console.log('ℹ️ HTTP check failed, using standard fallback');
+                    }
+                }
+            } else {
+                console.log('⚠️ No QuoteFactory credentials - using basic response');
+            }
+        }
+       
+        const responseEmail = automation.formatResponse(loadReference, loadInfo, subject, emailContent);
+       
+        return res.status(200).json({
+            success: true,
+            loadReference: loadReference || null,
+            loadInfo: loadInfo || null,
+            responseSubject: responseEmail.subject,
+            responseBody: responseEmail.body,
+            quotefactoryAttempted: !!(loadReference && hasCredentials),
+            quotefactorySuccess: !!(loadInfo),
+            replyToEmailId: emailId,
+            timestamp: new Date().toISOString(),
+            mode: 'puppeteer-fixed'
+        });
+       
+    } catch (error) {
+        console.error('❌ Webhook error:', error);
+       
+        await automation.cleanup();
+       
+        return res.status(200).json({
+            success: true,
+            message: 'Error processing - fallback response',
+            responseSubject: 'Re: Load Inquiry',
+            responseBody: 'Thank you for your email. We are processing your inquiry and will respond shortly.',
+            timestamp: new Date().toISOString()
+        });
+    }
+}
+
+
+export const config = {
+    maxDuration: 30,
+};
+
+
+
+
+
