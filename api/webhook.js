@@ -1,4 +1,4 @@
-// api/webhook.js - Fixed Puppeteer with @sparticuz/chromium
+// api/webhook.js - Fixed Puppeteer with Enhanced Data Extraction
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
 
@@ -10,51 +10,49 @@ class LoadAutomationEnhanced {
     }
 
 
+    async wait(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+
     async initialize() {
         try {
             console.log('🚀 Initializing browser for QuoteFactory...');
            
-            // Try multiple browser strategies
+            // Strategy 1: Use Browserless.io service (RECOMMENDED for Vercel)
             if (process.env.BROWSERLESS_TOKEN) {
-                // Strategy 1: Use Browserless.io service
                 console.log('🌐 Using Browserless.io service...');
-                console.log('Token length:', process.env.BROWSERLESS_TOKEN.length);
                 try {
                     this.browser = await puppeteer.connect({
                         browserWSEndpoint: `wss://production-sfo.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
                     });
-
-
+                    console.log('✅ Connected to Browserless.io successfully');
                 } catch (browserlessError) {
-                    console.log('❌ Browserless.io failed (403 - token invalid/expired)');
-                    console.log('💡 Please get a fresh token from https://www.browserless.io/');
-                    // Continue to local chromium fallback
+                    console.log('❌ Browserless.io failed:', browserlessError.message);
+                    console.log('💡 Please check your token at https://www.browserless.io/');
                 }
+            } else {
+                console.log('⚠️ No BROWSERLESS_TOKEN found - browser automation may fail on Vercel');
+                console.log('💡 Get free token from https://www.browserless.io/');
             }
            
             // Strategy 2: Try local chromium if no browser yet
             if (!this.browser) {
-                console.log('🔧 Falling back to local chromium...');
-                const isLocal = !!process.env.CHROME_BIN || !!process.env.PUPPETEER_SKIP_CHROMIUM_DOWNLOAD;
+                console.log('🔧 Attempting local chromium (may fail on serverless)...');
+                const isServerless = !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
                
-                let launchOptions;
-               
-                if (isLocal) {
-                    // Local development
-                    launchOptions = {
-                        headless: true,
-                        args: ['--no-sandbox', '--disable-setuid-sandbox']
-                    };
-                } else {
-                    // Vercel production with @sparticuz/chromium
-                    launchOptions = {
-                        args: chromium.args,
-                        defaultViewport: chromium.defaultViewport,
-                        executablePath: await chromium.executablePath(),
-                        headless: chromium.headless,
-                        ignoreHTTPSErrors: true,
-                    };
+                if (isServerless) {
+                    console.log('⚠️ WARNING: Running in serverless environment without Browserless.io');
+                    console.log('⚠️ This will likely fail due to missing system libraries');
+                    throw new Error('Browser automation requires Browserless.io token in serverless environments. Please add BROWSERLESS_TOKEN to environment variables.');
                 }
+               
+                // Local development only
+                console.log('💻 Using local Chrome installation...');
+                const launchOptions = {
+                    headless: true,
+                    args: ['--no-sandbox', '--disable-setuid-sandbox']
+                };
                
                 this.browser = await puppeteer.launch(launchOptions);
             }
@@ -126,8 +124,6 @@ class LoadAutomationEnhanced {
             /([A-HJ-Z]+\d{4,8}[A-Z0-9]*)/i
         ];
        
-        console.log('🔍 Searching for load reference...');
-       
         for (let i = 0; i < patterns.length; i++) {
             const pattern = patterns[i];
             const match = emailBody.match(pattern);
@@ -141,7 +137,6 @@ class LoadAutomationEnhanced {
                     !cleanMatch.toUpperCase().startsWith('MC') &&
                     !cleanMatch.toUpperCase().startsWith('DOT')) {
                    
-                    console.log(`✅ Found load reference: "${cleanMatch}"`);
                     return cleanMatch;
                 }
             }
@@ -164,12 +159,12 @@ class LoadAutomationEnhanced {
                 return false;
             }
            
-            this.page.setDefaultTimeout(20000);
-            this.page.setDefaultNavigationTimeout(20000);
+            this.page.setDefaultTimeout(15000);
+            this.page.setDefaultNavigationTimeout(15000);
            
             await this.page.goto('https://app.quotefactory.com', {
                 waitUntil: 'domcontentloaded',
-                timeout: 20000
+                timeout: 15000
             });
            
             console.log('Current URL:', this.page.url());
@@ -180,7 +175,7 @@ class LoadAutomationEnhanced {
             }
            
             console.log('🔄 Need to perform login...');
-            await this.page.waitForTimeout(3000);
+            await this.wait(500);
            
             try {
                 let loginSuccess = false;
@@ -193,8 +188,8 @@ class LoadAutomationEnhanced {
                    
                     if (emailField && passwordField) {
                         console.log('📝 Filling credentials...');
-                        await emailField.type(username);
-                        await passwordField.type(password);
+                        await emailField.type(username, { delay: 10 });
+                        await passwordField.type(password, { delay: 10 });
                         await this.page.keyboard.press('Enter');
                         loginSuccess = true;
                     }
@@ -218,8 +213,8 @@ class LoadAutomationEnhanced {
                                 const passwordField = await frame.$('input[type="password"]');
                                
                                 if (emailField && passwordField) {
-                                    await emailField.type(username);
-                                    await passwordField.type(password);
+                                    await emailField.type(username, { delay: 10 });
+                                    await passwordField.type(password, { delay: 10 });
                                     await frame.keyboard.press('Enter');
                                     loginSuccess = true;
                                     break;
@@ -237,15 +232,31 @@ class LoadAutomationEnhanced {
                 }
                
                 console.log('⏳ Waiting for login to complete...');
-                await this.page.waitForTimeout(8000);
                
-                const currentUrl = this.page.url();
-                console.log('Post-login URL:', currentUrl);
-               
-                if (currentUrl.includes('/broker/dashboard') || currentUrl.includes('/dashboard')) {
+                // Wait for OAuth callback redirect to complete
+                try {
+                    await this.page.waitForFunction(
+                        () => window.location.href.includes('/broker/dashboard') || window.location.href.includes('/dashboard'),
+                        { timeout: 2000 }
+                    );
                     console.log('✅ Login successful!');
                     return true;
-                } else {
+                } catch (timeoutError) {
+                    const currentUrl = this.page.url();
+                    console.log('Post-login URL:', currentUrl);
+                   
+                    // If we're on the auth callback, wait a bit more for redirect
+                    if (currentUrl.includes('/auth?code=')) {
+                        console.log('⏳ On OAuth callback, waiting for redirect...');
+                        await this.wait(3000);
+                       
+                        const finalUrl = this.page.url();
+                        if (finalUrl.includes('/broker/dashboard') || finalUrl.includes('/dashboard')) {
+                            console.log('✅ Login successful after redirect!');
+                            return true;
+                        }
+                    }
+                   
                     console.log('❌ Login may have failed - not on dashboard');
                     return false;
                 }
@@ -264,58 +275,77 @@ class LoadAutomationEnhanced {
 
     async searchLoadInfo(loadReference) {
         try {
-            console.log(`🔍 Searching for load: ${loadReference}`);
-            await this.page.waitForSelector('input[type="search"], input[placeholder*="Search"]', { timeout: 10000 });
-
-
-            const searchInput = await this.page.$('input[type="search"], input[placeholder*="Search"]');
-            await searchInput.click({ clickCount: 3 });
-            await searchInput.type(loadReference);
-            await this.page.keyboard.press('Enter');
-
-
-            console.log('⏳ Waiting for search results...');
-            await this.page.waitForTimeout(5000);
-
-
-            // Try to click on the load result
-            const loadSelector = `text="${loadReference}"`;
-            const [loadButton] = await this.page.$x(`//*[contains(text(), "${loadReference}")]`);
-            if (loadButton) {
-            console.log('✅ Found load, opening details...');
-            await loadButton.click();
-            await this.page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 });
-            } else {
-            console.log('⚠️ Load not clickable - trying fallback Enter');
-            await this.page.keyboard.press('Enter');
+            console.log(`\n🔎 Searching for load reference: ${loadReference}`);
+           
+            // Step 1: Click search button to open search
+            console.log("⌨️  Opening search by clicking button...");
+           
+            let searchFieldFound = false;
+            try {
+                await this.page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const searchBtn = buttons.find(btn =>
+                        btn.textContent.includes('Find') ||
+                        btn.textContent.includes('anything')
+                    );
+                    if (searchBtn) {
+                        searchBtn.click();
+                        return true;
+                    }
+                    return false;
+                });
+                console.log("✅ Clicked search button");
+                await this.wait(1500);
+                await this.page.waitForSelector('#search_field', { timeout: 5000 });
+                searchFieldFound = true;
+                console.log("✅ Search field appeared!");
+            } catch (err) {
+                console.log("❌ Could not open search");
             }
-
-
-            // Now scrape data from load detail page
-            console.log('⏳ Extracting load details...');
-            const loadData = await this.page.evaluate(() => {
-            const pickup = document.querySelector('[data-testid*="pickup"], [class*="pickup"]')?.textContent || '';
-            const delivery = document.querySelector('[data-testid*="delivery"], [class*="delivery"]')?.textContent || '';
-            const weight = document.querySelector('text, [class*="weight"]')?.textContent || '';
-            const rate = document.querySelector('[class*="rate"], [data-testid*="rate"]')?.textContent || '';
-            return { pickup, delivery, weight, rate };
+           
+            if (!searchFieldFound) {
+                console.log('❌ Search field not found');
+                return null;
+            }
+           
+            console.log("✅ Search field is ready!");
+           
+            // Step 3: Type the reference
+            console.log(`⌨️  Typing load reference: ${loadReference}`);
+            await this.page.click('#search_field', { clickCount: 3 });
+            await this.page.type('#search_field', loadReference, { delay: 50 });
+            console.log(`✅ Typed: ${loadReference}`);
+           
+            // Step 4: Press Enter
+            console.log("⏎ Pressing Enter to search...");
+            await this.page.keyboard.press('Enter');
+            console.log("✅ Enter pressed");
+           
+            // Step 5: Wait for results to load
+            console.log("⏳ Waiting for search results to load...");
+            await this.wait(8000);
+           
+            // Click on search result
+            await this.page.evaluate(() => {
+                ['.\\@container a[data-current="true"]', '.\\@container a', '.\\@container'].some(sel => {
+                    const el = document.querySelector(sel);
+                    if (el) { el.click(); return true; }
+                });
             });
-
-
-            if (loadData.pickup || loadData.delivery) {
-            console.log('✅ Load details successfully retrieved');
-            return {
-                pickup: loadData.pickup || 'Pickup TBD',
-                delivery: loadData.delivery || 'Delivery TBD',
-                weight: loadData.weight || 'Weight TBD',
-                rate: loadData.rate || 'Rate TBD'
-            };
+            await this.wait(5000);
+           
+            // Step 6: Extract load info with enhanced extraction
+            console.log("📊 Extracting load details...");
+            const loadInfo = await this.extractLoadDetailsFromPage();
+           
+            if (loadInfo && (loadInfo.loadReference !== "N/A" || loadInfo.pickup !== "N/A" || loadInfo.delivery !== "N/A")) {
+                console.log("✅ Load data extracted successfully");
+                return loadInfo;
             } else {
-            console.log('⚠️ Could not find structured data - returning fallback');
-            return null;
+                console.log("⚠️ No load data found");
+                return null;
             }
-
-
+           
         } catch (error) {
             console.error('❌ Load search failed:', error.message);
             return null;
@@ -323,10 +353,144 @@ class LoadAutomationEnhanced {
     }
 
 
+    async extractLoadDetailsFromPage() {
+        return await this.page.evaluate(() => {
+            const text = document.body.innerText;
+           
+            // Extract BOL/Load Reference
+            const bolMatch = text.match(/BOL[\s\n]+(\d+)/i);
+            const loadReference = bolMatch ? bolMatch[1] : "N/A";
+           
+            // Extract Rate from specific styled div
+            let rate = "N/A";
+            const priceDiv = document.querySelector('.text-right.py-2.font-bold.order-last.px-3');
+            if (priceDiv) {
+                const m = priceDiv.textContent.match(/\$[\d,]+\.?\d*/);
+                if (m) rate = m[0];
+            }
+           
+            // Extract Weight
+            let weight = "N/A";
+            const weightDiv = Array.from(document.querySelectorAll("div")).find(d => d.textContent.trim() === "Weight");
+            if (weightDiv) {
+                const val = weightDiv.closest(".flex")?.querySelector("div.font-semibold, .text-12, .text-15");
+                if (val) {
+                    const txt = val.textContent.replace(/\u202F/g, "").trim();
+                    weight = txt.match(/lb/i) ? txt : `${txt} lb`;
+                }
+            }
+           
+            // Extract Commodity
+            let commodity = "N/A";
+            const commDiv = Array.from(document.querySelectorAll("div.text-black-100.text-12.pt-1.flex.items-baseline")).find(d => d.querySelector("div.font-semibold"));
+            if (commDiv) {
+                const strong = commDiv.querySelector("div.font-semibold")?.textContent.trim() || "";
+                commodity = strong.replace(/&nbsp;/g, '').trim();
+            }
+           
+            // Helper function to convert "4:25am" or "12:45pm" → "0425" or "1245"
+            function toMilitaryNoColon(timeStr) {
+                const match = timeStr.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+                if (!match) return timeStr.replace(/:/g, '').trim();
+                let [_, hour, minute, period] = match;
+                hour = parseInt(hour, 10);
+                if (period) {
+                    period = period.toLowerCase();
+                    if (period === 'pm' && hour !== 12) hour += 12;
+                    if (period === 'am' && hour === 12) hour = 0;
+                }
+                return `${String(hour).padStart(2, '0')}${minute}`;
+            }
+
+
+            const locs = Array.from(document.querySelectorAll('[id^="shipment-location-"]'));
+            const pickups = [], deliveries = [];
+            let foundPickup = false;
+
+
+            locs.forEach(loc => {
+                const addr = loc.querySelector('address');
+                if (!addr) return;
+
+
+                const lines = Array.from(addr.querySelectorAll('div')).map(d => d.textContent.trim()).filter(Boolean);
+                let cityState = lines.length > 1 ? lines[lines.length - 1].replace(/\s*\d{5}(?:-\d{4})?/, "").trim() : "";
+
+
+                const timeContainers = Array.from(loc.querySelectorAll('div.text-14'));
+                let dateTime = "N/A";
+
+
+                const timeContainer = timeContainers.find(container => container.querySelector('time'));
+
+
+                if (timeContainer) {
+                    const times = timeContainer.querySelectorAll('time');
+
+
+                    if (times.length >= 2) {
+                        // Time range (e.g., "9:00am - 6:00pm")
+                        const startTime = toMilitaryNoColon(times[0].textContent.trim());
+                        const endTime = toMilitaryNoColon(times[1].textContent.trim());
+
+
+                        const datetimeAttr = times[0].getAttribute('datetime');
+                        if (datetimeAttr) {
+                            const d = new Date(datetimeAttr);
+                            const mo = String(d.getMonth() + 1).padStart(2, '0');
+                            const day = String(d.getDate()).padStart(2, '0');
+                            dateTime = `${mo}/${day} ${startTime}-${endTime}`;
+                        } else {
+                            dateTime = `${startTime}-${endTime}`;
+                        }
+                    } else if (times.length === 1) {
+                        // Single time (e.g., "4:28pm")
+                        const time = toMilitaryNoColon(times[0].textContent.trim());
+                        const datetimeAttr = times[0].getAttribute('datetime');
+                        if (datetimeAttr) {
+                            const d = new Date(datetimeAttr);
+                            const mo = String(d.getMonth() + 1).padStart(2, '0');
+                            const day = String(d.getDate()).padStart(2, '0');
+                            dateTime = `${mo}/${day} ${time}`;
+                        } else {
+                            dateTime = `${time}`;
+                        }
+                    }
+                }
+
+
+                const txt = loc.textContent.toLowerCase();
+                const isPickup = txt.includes('PICK UP') || (txt.includes('PICKED UP') && !txt.includes('DELIVER'));
+                const isDelivery = txt.includes('DELIVER');
+
+
+                let finalPickup = isPickup, finalDelivery = isDelivery;
+                if (!finalPickup && !finalDelivery) {
+                    if (!foundPickup) finalPickup = true;
+                    else finalDelivery = true;
+                }
+
+
+                if (finalPickup) {
+                    foundPickup = true;
+                    pickups.push(`${cityState}, ${dateTime}`);
+                } else if (finalDelivery) {
+                    deliveries.push(`${cityState}, ${dateTime}`);
+                }
+            });
+
+
+            const pickup = pickups.length ? pickups.map((p, i) => `Pickup ${i + 1}: ${p}`).join("\n") : "N/A";
+            const delivery = deliveries.length ? deliveries.map((d, i) => `Delivery ${i + 1}: ${d}`).join("\n") : "N/A";
+
+
+            return { loadReference, rate, weight, commodity, pickup, delivery };
+        });
+    }
 
 
     formatResponse(loadReference, loadInfo, subject, originalEmail) {
-        if (loadInfo) {
+        if (loadInfo && loadInfo.pickup !== "N/A") {
             return {
                 subject: `Re: ${subject}`,
                 body: `Hello,
@@ -336,10 +500,11 @@ Thank you for your inquiry about load ${loadReference}. Here are the details:
 
 
 📦 LOAD DETAILS:
-- Pickup: ${loadInfo.pickup}
-- Delivery: ${loadInfo.delivery}
-- Weight: ${loadInfo.weight}
-- Rate: ${loadInfo.rate}
+${loadInfo.pickup}
+${loadInfo.delivery}
+Weight: ${loadInfo.weight}
+Commodity: ${loadInfo.commodity}
+Rate: ${loadInfo.rate}
 
 
 🚛 CAPACITY INQUIRY:
@@ -359,35 +524,19 @@ Automated response with live QuoteFactory data`
                 body: `Hello,
 
 
-Thank you for your inquiry regarding load ${loadReference}.
+We encountered an issue retrieving details for load reference **${loadReference}** from QuoteFactory.
 
+⚠️ Possible reasons:
+• The load number may not exist or is no longer active  
+• There was a temporary system error while accessing QuoteFactory
 
-I've identified this load reference and am currently pulling the complete details from our system. You'll receive:
+Our team has been notified and will review this manually.
 
-
-📦 LOAD INFORMATION:
-• Pickup and delivery locations with dates/times  
-• Commodity details and weight requirements
-• Our competitive rate quote
-• Equipment specifications
-• Any special handling requirements
-
-
-This detailed information will be sent within the next 10-15 minutes via our load management team.
-
-
-🚛 TO EXPEDITE: When and where will you be empty for pickup?
-
-
-We're ready to provide immediate quotes and book qualified loads on the spot.
-
-
-Best regards,
+Best regards,  
 Balto Booking
 
-
 ---
-Professional freight services with real-time load tracking`
+Automated notification - QuoteFactory load fetch error`
             };
         } else {
             return {
@@ -426,6 +575,8 @@ Automated response - Please reply with DAT reference number`
 
 
 export { LoadAutomationEnhanced };
+
+
 // VERCEL SERVERLESS HANDLER
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
@@ -457,8 +608,6 @@ export default async function handler(req, res) {
         let hasCredentials = false;
        
         if (loadReference) {
-            console.log(`✅ Found load reference: ${loadReference}`);
-           
             hasCredentials = process.env.QF_USERNAME && process.env.QF_PASSWORD;
            
             if (hasCredentials) {
@@ -477,7 +626,7 @@ export default async function handler(req, res) {
                    
                     // Try a simple HTTP check to see if load exists
                     try {
-                        const response = await fetch(`https://app.quotefactory.com/api/loads/search?q=${loadReference}`, {
+                        const response = await fetch(`https://app.quotefactory.com/api/shipment/search?q=${loadReference}`, {
                             headers: {
                                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                             },
@@ -486,14 +635,6 @@ export default async function handler(req, res) {
                        
                         if (response.ok) {
                             console.log('✅ Load exists in QuoteFactory (HTTP check)');
-                            // Set a flag that we found the load but couldn't scrape details
-                            loadInfo = {
-                                exists: true,
-                                pickup: 'Details being retrieved...',
-                                delivery: 'Details being retrieved...',
-                                weight: 'TBD',
-                                rate: 'Quote being prepared...'
-                            };
                         }
                     } catch (error) {
                         console.log('ℹ️ HTTP check failed, using standard fallback');
@@ -513,10 +654,10 @@ export default async function handler(req, res) {
             responseSubject: responseEmail.subject,
             responseBody: responseEmail.body,
             quotefactoryAttempted: !!(loadReference && hasCredentials),
-            quotefactorySuccess: !!(loadInfo),
+            quotefactorySuccess: !!(loadInfo && loadInfo.pickup !== "N/A"),
             replyToEmailId: emailId,
             timestamp: new Date().toISOString(),
-            mode: 'puppeteer-fixed'
+            mode: 'puppeteer-enhanced'
         });
        
     } catch (error) {
@@ -538,8 +679,6 @@ export default async function handler(req, res) {
 export const config = {
     maxDuration: 30,
 };
-
-
 
 
 
