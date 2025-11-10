@@ -524,7 +524,7 @@ Automated response with live QuoteFactory data`
                 body: `Hello,
 
 
-We encountered an issue retrieving details for load reference **${loadReference}** from QuoteFactory.
+We encountered an issue retrieving details for load reference ${loadReference} from QuoteFactory.
 
 ⚠️ Possible reasons:
 • The load number may not exist or is no longer active  
@@ -679,6 +679,3 @@ export default async function handler(req, res) {
 export const config = {
     maxDuration: 30,
 };
-
-
-
